@@ -4,12 +4,14 @@ export function useSpeechSynthesis() {
   const [speakEnabled, setSpeakEnabled] = useState(false);
   const [voices, setVoices] = useState([]);
   const voicesRef = useRef([]);
-  const utteranceRef = useRef(null);
+  const utteranceRef = useRef([]);
+  const speechIdRef = useRef(0);
 
   const updateVoices = useCallback(() => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       const availableVoices = window.speechSynthesis.getVoices();
-      if (availableVoices && availableVoices.length > 0) {
+
+      if (availableVoices.length > 0) {
         voicesRef.current = availableVoices;
         setVoices(availableVoices);
       }
@@ -19,10 +21,10 @@ export function useSpeechSynthesis() {
   useEffect(() => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       updateVoices();
-      if (window.speechSynthesis.onvoiceschanged !== undefined) {
-        window.speechSynthesis.onvoiceschanged = updateVoices;
-      }
+
+      window.speechSynthesis.onvoiceschanged = updateVoices;
     }
+
     return () => {
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
         window.speechSynthesis.cancel();
@@ -30,70 +32,119 @@ export function useSpeechSynthesis() {
     };
   }, [updateVoices]);
 
-  const speak = useCallback((text, langCode, isManual = false) => {
-    if ((!speakEnabled && !isManual) || !text || typeof window === 'undefined' || !('speechSynthesis' in window)) {
-      return;
-    }
-
-    try {
-      window.speechSynthesis.cancel(); // Stop ongoing speech
-
-      if (window.speechSynthesis.paused) {
-        window.speechSynthesis.resume();
+  const speak = useCallback(
+    (text, langCode, isManual = false) => {
+      if (
+        (!speakEnabled && !isManual) ||
+        !text ||
+        typeof window === 'undefined' ||
+        !('speechSynthesis' in window)
+      ) {
+        return;
       }
 
-      const cleanText = text.trim();
+      const cleanText = String(text).trim();
       if (!cleanText) return;
 
-      const utterance = new SpeechSynthesisUtterance(cleanText);
+      const speech = window.speechSynthesis;
 
-      // Keep reference to prevent Chrome garbage collection mid-speech
-      utteranceRef.current = utterance;
-      utterance.onend = () => {
-        utteranceRef.current = null;
-      };
-      utterance.onerror = (err) => {
-        console.warn('SpeechSynthesis utterance error:', err);
-        utteranceRef.current = null;
-      };
+      // Invalidate any previously scheduled speech timeout
+      speechIdRef.current += 1;
+      const currentSpeechId = speechIdRef.current;
 
-      // Query latest available voices
-      let availableVoices = window.speechSynthesis.getVoices();
-      if (!availableVoices || availableVoices.length === 0) {
+      // Cancel any current speech in Chrome queue
+      speech.cancel();
+
+      let availableVoices = speech.getVoices();
+      if (!availableVoices.length) {
         availableVoices = voicesRef.current;
       }
 
-      const isHindi = langCode === 'hi';
-      let matchingVoice = null;
+      const langLower = String(langCode || '').toLowerCase();
+      const isHindi =
+        langLower.includes('hindi') || langLower.startsWith('hi');
 
+      let matchingVoice;
       if (isHindi) {
-        utterance.lang = 'hi-IN';
         matchingVoice =
-          availableVoices.find((v) => v.lang.toLowerCase().includes('hi-in')) ||
-          availableVoices.find((v) => v.lang.toLowerCase().includes('hi'));
+          availableVoices.find(
+            (voice) =>
+              voice.name === 'Google हिन्दी' &&
+              voice.lang.toLowerCase().includes('hi')
+          ) ||
+          availableVoices.find(
+            (voice) => voice.name === 'Google हिन्दी'
+          ) ||
+          availableVoices.find(
+            (voice) =>
+              voice.name.includes('Google') &&
+              voice.lang.toLowerCase().includes('hi')
+          ) ||
+          availableVoices.find((voice) =>
+            voice.lang.toLowerCase().includes('hi')
+          );
       } else {
-        // English target language (en-US or en-IN)
-        utterance.lang = 'en-US';
         matchingVoice =
-          availableVoices.find((v) => v.lang.toLowerCase().includes('en-us')) ||
-          availableVoices.find((v) => v.lang.toLowerCase().includes('en-in')) ||
-          availableVoices.find((v) => v.lang.toLowerCase().startsWith('en')) ||
-          availableVoices.find((v) => v.lang.toLowerCase().includes('en'));
+          availableVoices.find(
+            (voice) => voice.lang.toLowerCase() === 'en-us'
+          ) ||
+          availableVoices.find(
+            (voice) => voice.lang.toLowerCase() === 'en-in'
+          ) ||
+          availableVoices.find((voice) =>
+            voice.lang.toLowerCase().startsWith('en')
+          );
       }
+
+      const utterance = new SpeechSynthesisUtterance(cleanText);
+
+      utterance.lang = matchingVoice
+        ? matchingVoice.lang
+        : isHindi
+          ? 'hi-IN'
+          : 'en-US';
 
       if (matchingVoice) {
         utterance.voice = matchingVoice;
-        utterance.lang = matchingVoice.lang;
       }
 
-      utterance.rate = 1.0;
+      utterance.rate = isHindi ? 0.8 : 1.0;
       utterance.pitch = 1.0;
+      utterance.volume = 1.0;
 
-      window.speechSynthesis.speak(utterance);
-    } catch (err) {
-      console.warn('SpeechSynthesis error:', err);
-    }
-  }, [speakEnabled]);
+      utterance.onstart = () => {
+        console.log('🔊 TTS playback started:', {
+          lang: utterance.lang,
+          voice: matchingVoice?.name || 'default',
+          text: cleanText,
+        });
+      };
+
+      utterance.onend = () => {
+        console.log('🔊 TTS playback completed:', cleanText);
+      };
+
+      utterance.onerror = (event) => {
+        console.warn('🔊 SpeechSynthesis error event:', {
+          error: event.error,
+          language: utterance.lang,
+          voice: matchingVoice?.name,
+          text: cleanText,
+        });
+      };
+
+      // Keep utterance in ref to prevent Chrome garbage collection
+      utteranceRef.current = [utterance];
+
+      // Allow 250ms after cancel() for browser speech queue to settle
+      setTimeout(() => {
+        if (currentSpeechId === speechIdRef.current) {
+          speech.speak(utterance);
+        }
+      }, 250);
+    },
+    [speakEnabled]
+  );
 
   return {
     speakEnabled,
@@ -101,4 +152,5 @@ export function useSpeechSynthesis() {
     speak,
   };
 }
+
 

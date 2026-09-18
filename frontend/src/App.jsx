@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+
 import { Header } from './components/Header';
 import { ConnectionStatus } from './components/ConnectionStatus';
 import { SpeakerSelector } from './components/SpeakerSelector';
@@ -7,7 +8,6 @@ import { ConversationList } from './components/ConversationList';
 import { InsightsPanel } from './components/InsightsPanel';
 import { Controls } from './components/Controls';
 import { DemoModeBanner } from './components/DemoModeBanner';
-
 import { useWebSocket } from './hooks/useWebSocket';
 import { useAudioRecorder } from './hooks/useAudioRecorder';
 import { useSpeechSynthesis } from './hooks/useSpeechSynthesis';
@@ -30,26 +30,57 @@ export default function App() {
     clearConversation,
   } = useWebSocket();
 
-  const { isRecording, permissionError, startRecording, stopRecording } =
-    useAudioRecorder(sendAudioChunk);
+  const {
+    isRecording,
+    permissionError,
+    startRecording,
+    stopRecording,
+  } = useAudioRecorder(sendAudioChunk);
 
-  const { speakEnabled, setSpeakEnabled, speak } = useSpeechSynthesis();
+  const {
+    speakEnabled,
+    setSpeakEnabled,
+    speak,
+  } = useSpeechSynthesis();
+
   const lastSpokenIdRef = React.useRef(null);
 
-  // Speak translations automatically when new final message arrives if enabled
+  // Speak each new final message only once when speech is enabled
   useEffect(() => {
-    if (messages.length > 0) {
-      const latestMsg = messages[messages.length - 1];
-      if (latestMsg && latestMsg.id && lastSpokenIdRef.current !== latestMsg.id) {
-        lastSpokenIdRef.current = latestMsg.id;
-        const targetLangCode = latestMsg.target_language === 'Hindi' ? 'hi' : 'en';
-        speak(latestMsg.translation, targetLangCode);
-      }
-    } else {
-      lastSpokenIdRef.current = null;
+    if (!speakEnabled || messages.length === 0) {
+      return;
     }
-  }, [messages, speak]);
 
+    const latestMsg = messages[messages.length - 1];
+
+    if (
+      !latestMsg?.id ||
+      lastSpokenIdRef.current === latestMsg.id
+    ) {
+      return;
+    }
+
+    lastSpokenIdRef.current = latestMsg.id;
+
+    const targetLanguage = String(
+      latestMsg.target_language || ''
+    ).toLowerCase();
+
+    const targetLangCode =
+      targetLanguage.includes('hindi') ||
+        targetLanguage === 'hi'
+        ? 'hi'
+        : 'en';
+
+    console.log('🔊 Speaking new message:', {
+      id: latestMsg.id,
+      text: latestMsg.translation,
+      target_language: latestMsg.target_language,
+      targetLangCode,
+    });
+
+    speak(latestMsg.translation, targetLangCode);
+  }, [messages, speakEnabled, speak]);
 
   const handleStartConversation = async () => {
     setIsDemoActive(false);
@@ -97,7 +128,11 @@ export default function App() {
       />
 
       <div className="main-grid">
-        <ConversationList messages={messages} onSpeakText={speak} />
+        <ConversationList
+          messages={messages}
+          onSpeakText={speak}
+        />
+
         <InsightsPanel insights={insights} />
       </div>
 

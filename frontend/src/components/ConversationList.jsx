@@ -46,7 +46,11 @@ export function ConversationList({ messages, onSpeakText }) {
                       <button
                         className="tts-btn"
                         title="Speak translation aloud"
-                        onClick={() => onSpeakText(msg.translation, msg.target_language === 'Hindi' ? 'hi' : 'en', true)}
+                        onClick={() => {
+                          const tgt = String(msg.target_language || '').toLowerCase();
+                          const targetLang = tgt.includes('hindi') || tgt.startsWith('hi') ? 'hi' : 'en';
+                          onSpeakText(msg.translation, targetLang, true);
+                        }}
                       >
                         🔊 Listen
                       </button>

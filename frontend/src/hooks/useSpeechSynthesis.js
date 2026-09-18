@@ -48,7 +48,7 @@ export function useSpeechSynthesis() {
 
       const speech = window.speechSynthesis;
 
-      // Invalidate any previously scheduled speech timeout
+      // Invalidate any previously scheduled speech sequence
       speechIdRef.current += 1;
       const currentSpeechId = speechIdRef.current;
 
@@ -96,52 +96,91 @@ export function useSpeechSynthesis() {
           );
       }
 
-      const utterance = new SpeechSynthesisUtterance(cleanText);
+      // Hindi Chrome TTS fails/stops on long text payloads.
+      // Break long Hindi text into short ~6-word chunks to prevent Chrome TTS silent failures.
+      const words = cleanText.split(/\s+/);
+      const chunks = [];
 
-      utterance.lang = matchingVoice
-        ? matchingVoice.lang
-        : isHindi
-          ? 'hi-IN'
-          : 'en-US';
-
-      if (matchingVoice) {
-        utterance.voice = matchingVoice;
+      if (isHindi && words.length > 7) {
+        for (let i = 0; i < words.length; i += 6) {
+          chunks.push(words.slice(i, i + 6).join(' '));
+        }
+      } else {
+        chunks.push(cleanText);
       }
 
-      utterance.rate = isHindi ? 0.8 : 1.0;
-      utterance.pitch = 1.0;
-      utterance.volume = 1.0;
+      utteranceRef.current = [];
 
-      utterance.onstart = () => {
-        console.log('🔊 TTS playback started:', {
-          lang: utterance.lang,
-          voice: matchingVoice?.name || 'default',
-          text: cleanText,
-        });
+      const speakChunk = (index) => {
+        if (currentSpeechId !== speechIdRef.current) {
+          return;
+        }
+
+        if (index >= chunks.length) {
+          utteranceRef.current = [];
+          return;
+        }
+
+        const utterance = new SpeechSynthesisUtterance(chunks[index]);
+
+        utterance.lang = matchingVoice
+          ? matchingVoice.lang
+          : isHindi
+            ? 'hi-IN'
+            : 'en-US';
+
+        if (matchingVoice) {
+          utterance.voice = matchingVoice;
+        }
+
+        utterance.rate = isHindi ? 0.85 : 1.0;
+        utterance.pitch = 1.0;
+        utterance.volume = 1.0;
+
+        utterance.onstart = () => {
+          console.log('🔊 TTS playback started chunk:', {
+            index,
+            totalChunks: chunks.length,
+            lang: utterance.lang,
+            voice: matchingVoice?.name || 'default',
+            text: chunks[index],
+          });
+        };
+
+        utterance.onend = () => {
+          if (currentSpeechId !== speechIdRef.current) {
+            return;
+          }
+          console.log(`🔊 TTS chunk ${index + 1}/${chunks.length} completed.`);
+          setTimeout(() => {
+            speakChunk(index + 1);
+          }, 100);
+        };
+
+        utterance.onerror = (event) => {
+          console.warn('🔊 SpeechSynthesis error event:', {
+            error: event.error,
+            language: utterance.lang,
+            voice: matchingVoice?.name,
+            text: chunks[index],
+          });
+          if (currentSpeechId === speechIdRef.current) {
+            utteranceRef.current = [];
+          }
+        };
+
+        // Keep active utterances in ref to prevent Chrome garbage collection mid-speech
+        utteranceRef.current.push(utterance);
+
+        speech.speak(utterance);
       };
 
-      utterance.onend = () => {
-        console.log('🔊 TTS playback completed:', cleanText);
-      };
-
-      utterance.onerror = (event) => {
-        console.warn('🔊 SpeechSynthesis error event:', {
-          error: event.error,
-          language: utterance.lang,
-          voice: matchingVoice?.name,
-          text: cleanText,
-        });
-      };
-
-      // Keep utterance in ref to prevent Chrome garbage collection
-      utteranceRef.current = [utterance];
-
-      // Allow 250ms after cancel() for browser speech queue to settle
+      // Allow 200ms after cancel() for browser speech queue to settle before starting chunk sequence
       setTimeout(() => {
         if (currentSpeechId === speechIdRef.current) {
-          speech.speak(utterance);
+          speakChunk(0);
         }
-      }, 250);
+      }, 200);
     },
     [speakEnabled]
   );
@@ -152,5 +191,3 @@ export function useSpeechSynthesis() {
     speak,
   };
 }
-
-

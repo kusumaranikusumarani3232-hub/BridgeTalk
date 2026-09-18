@@ -42,7 +42,17 @@ export default function App() {
       const latestMsg = messages[messages.length - 1];
       if (latestMsg && latestMsg.id && lastSpokenIdRef.current !== latestMsg.id) {
         lastSpokenIdRef.current = latestMsg.id;
-        const targetLangCode = latestMsg.target_language === 'Hindi' ? 'hi' : 'en';
+        const targetLanguage = String(latestMsg.target_language || '').toLowerCase();
+        const targetLangCode = targetLanguage.includes('hindi') || targetLanguage === 'hi'
+          ? 'hi'
+          : 'en';
+
+        console.log('🔊 Speaking:', {
+          text: latestMsg.translation,
+          target_language: latestMsg.target_language,
+          targetLangCode,
+        });
+
         speak(latestMsg.translation, targetLangCode);
       }
     } else {

@@ -20,7 +20,7 @@ export function useWebSocket() {
     }
 
     isConnectingRef.current = true;
-    const wsUrl = 'ws://127.0.0.1:8000/ws/transcribe';
+    const wsUrl = 'wss://bridgetalk-olvd.onrender.com/ws/transcribe';
     console.log('Connecting WebSocket to:', wsUrl);
 
     let ws;

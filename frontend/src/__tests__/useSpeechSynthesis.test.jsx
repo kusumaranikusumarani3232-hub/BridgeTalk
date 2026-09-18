@@ -10,7 +10,9 @@ describe('useSpeechSynthesis hook unit tests', () => {
 
   beforeEach(() => {
     createdUtterances = [];
-    mockSpeakFn = vi.fn();
+    mockSpeakFn = vi.fn((utterance) => {
+      // Simulate onend after a short timer
+    });
     mockCancelFn = vi.fn();
     mockGetVoicesFn = vi.fn().mockReturnValue([
       { name: 'Google हिन्दी', lang: 'hi-IN' },
@@ -26,6 +28,9 @@ describe('useSpeechSynthesis hook unit tests', () => {
         this.rate = 1.0;
         this.pitch = 1.0;
         this.volume = 1.0;
+        this.onend = null;
+        this.onerror = null;
+        this.onstart = null;
         createdUtterances.push(this);
       }
     };
@@ -60,13 +65,36 @@ describe('useSpeechSynthesis hook unit tests', () => {
     expect(mockSpeakFn).not.toHaveBeenCalled();
   });
 
-  it('speaks long Hindi sentence in a single full utterance when enabled', () => {
+  it('speaks short Hindi text ("नमस्ते") in a single utterance', () => {
     const { result } = renderHook(() => useSpeechSynthesis());
 
     act(() => {
       result.current.setSpeakEnabled(true);
     });
 
+    act(() => {
+      result.current.speak('नमस्ते', 'hi');
+    });
+
+    expect(mockCancelFn).toHaveBeenCalled();
+    vi.advanceTimersByTime(250);
+
+    expect(mockSpeakFn).toHaveBeenCalledTimes(1);
+    expect(createdUtterances.length).toBe(1);
+    expect(createdUtterances[0].text).toBe('नमस्ते');
+    expect(createdUtterances[0].lang).toBe('hi-IN');
+    expect(createdUtterances[0].voice.name).toBe('Google हिन्दी');
+    expect(createdUtterances[0].rate).toBe(0.85);
+  });
+
+  it('chunks long Hindi text into multiple short utterances played sequentially', () => {
+    const { result } = renderHook(() => useSpeechSynthesis());
+
+    act(() => {
+      result.current.setSpeakEnabled(true);
+    });
+
+    // 8 words > 7 words threshold
     const longHindiText = 'क्या हम कल सुबह दस बजे मीटिंग कर सकते हैं';
 
     act(() => {
@@ -74,31 +102,26 @@ describe('useSpeechSynthesis hook unit tests', () => {
     });
 
     expect(mockCancelFn).toHaveBeenCalled();
-    vi.advanceTimersByTime(300);
+    vi.advanceTimersByTime(250);
 
+    // First chunk spoken
     expect(mockSpeakFn).toHaveBeenCalledTimes(1);
     expect(createdUtterances.length).toBe(1);
-    expect(createdUtterances[0].text).toBe(longHindiText);
+    expect(createdUtterances[0].text).toBe('क्या हम कल सुबह दस बजे');
     expect(createdUtterances[0].lang).toBe('hi-IN');
-    expect(createdUtterances[0].voice.name).toBe('Google हिन्दी');
-    expect(createdUtterances[0].rate).toBe(0.8);
-  });
 
-  it('speaks long Hindi sentence when manually requested even if speakEnabled is false', () => {
-    const { result } = renderHook(() => useSpeechSynthesis());
-
-    const longHindiText = 'क्या हम कल सुबह दस बजे मीटिंग कर सकते हैं';
-
+    // Simulate first chunk ending
     act(() => {
-      result.current.speak(longHindiText, 'hi', true);
+      if (createdUtterances[0].onend) {
+        createdUtterances[0].onend();
+      }
     });
+    vi.advanceTimersByTime(150);
 
-    expect(mockCancelFn).toHaveBeenCalled();
-    vi.advanceTimersByTime(300);
-
-    expect(mockSpeakFn).toHaveBeenCalledTimes(1);
-    expect(createdUtterances[0].text).toBe(longHindiText);
-    expect(createdUtterances[0].lang).toBe('hi-IN');
+    // Second chunk spoken
+    expect(mockSpeakFn).toHaveBeenCalledTimes(2);
+    expect(createdUtterances.length).toBe(2);
+    expect(createdUtterances[1].text).toBe('मीटिंग कर सकते हैं');
   });
 
   it('speaks English sentence with en-US voice and rate 1.0', () => {
@@ -114,7 +137,7 @@ describe('useSpeechSynthesis hook unit tests', () => {
       result.current.speak(englishText, 'en');
     });
 
-    vi.advanceTimersByTime(300);
+    vi.advanceTimersByTime(250);
 
     expect(mockSpeakFn).toHaveBeenCalledTimes(1);
     expect(createdUtterances[0].text).toBe(englishText);

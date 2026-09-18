@@ -34,15 +34,22 @@ export default function App() {
     useAudioRecorder(sendAudioChunk);
 
   const { speakEnabled, setSpeakEnabled, speak } = useSpeechSynthesis();
+  const lastSpokenIdRef = React.useRef(null);
 
   // Speak translations automatically when new final message arrives if enabled
   useEffect(() => {
     if (messages.length > 0) {
       const latestMsg = messages[messages.length - 1];
-      const targetLangCode = latestMsg.target_language === 'Hindi' ? 'hi' : 'en';
-      speak(latestMsg.translation, targetLangCode);
+      if (latestMsg && latestMsg.id && lastSpokenIdRef.current !== latestMsg.id) {
+        lastSpokenIdRef.current = latestMsg.id;
+        const targetLangCode = latestMsg.target_language === 'Hindi' ? 'hi' : 'en';
+        speak(latestMsg.translation, targetLangCode);
+      }
+    } else {
+      lastSpokenIdRef.current = null;
     }
   }, [messages, speak]);
+
 
   const handleStartConversation = async () => {
     setIsDemoActive(false);

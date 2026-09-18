@@ -67,4 +67,34 @@ describe('BridgeTalk Frontend Component Unit Tests', () => {
     expect(screen.getByText('Tomorrow')).toBeDefined();
     expect(screen.getByText('Date')).toBeDefined();
   });
+
+  it('triggers speech synthesis with full translated text on manual listen button click', () => {
+    let spokenText = null;
+    let spokenLang = null;
+    const mockSpeak = (text, lang) => {
+      spokenText = text;
+      spokenLang = lang;
+    };
+
+    const sampleMsgs = [
+      {
+        id: '1',
+        speaker: 'person_a',
+        speaker_name: 'Person A',
+        source_language: 'Hindi',
+        target_language: 'English',
+        original_text: 'Namaste, kya aap kal aa sakte hain?',
+        translation: 'Hello, can you come tomorrow?',
+        timestamp: '10:00:00',
+      },
+    ];
+
+    render(<ConversationList messages={sampleMsgs} onSpeakText={mockSpeak} />);
+    const listenBtn = screen.getByText('🔊 Listen');
+    listenBtn.click();
+
+    expect(spokenText).toBe('Hello, can you come tomorrow?');
+    expect(spokenLang).toBe('en');
+  });
 });
+

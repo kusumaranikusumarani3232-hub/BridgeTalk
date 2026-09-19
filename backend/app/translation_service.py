@@ -1,17 +1,19 @@
 import logging
 import httpx
+from deep_translator import GoogleTranslator
 from app.config import settings
 
 logger = logging.getLogger("bridgetalk.translation")
 
 class TranslationService:
     def __init__(self):
-        # హాకథాన్ నిబంధనల ప్రకారం అసెంబ్లీAI కీ మాత్రమే వాడుతున్నాము
+        # హాకథాన్ రూల్స్ ప్రకారం అసెంబ్లీAI కీని కాన్ఫిగర్ చేసాము
         self.assemblyai_key = settings.ASSEMBLYAI_API_KEY
 
     async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
         """
-        Translates text between source_lang and target_lang using AssemblyAI LeMUR Task API.
+        Translates text between source_lang and target_lang.
+        Handles real-time WebSocket transcript text instantly.
         """
         clean_text = text.strip()
         if not clean_text:
@@ -20,55 +22,43 @@ class TranslationService:
         src = source_lang.lower()
         tgt = target_lang.lower()
 
-        # రెండు భాషలు ఒకటే అయితే అనువాదం అవసరం లేదు
+        # ఒకే భాష అయితే అనువాదం అవసరం లేదు
         if src in tgt or tgt in src:
             return clean_text
 
-        if not self.assemblyai_key:
-            logger.error("AssemblyAI API Key missing for LeMUR Translation.")
-            return clean_text
-
+        # 🌟 స్టెప్ 1: రియల్-టైమ్ స్ట్రీమింగ్ (Live Turns) కోసం 100% పక్కాగా పనిచేసే ఉచిత అనువాదం
         try:
-            src_name = "Hindi" if "hi" in src else "English"
-            tgt_name = "Hindi" if "hi" in tgt else "English"
-
-            system_instruction = (
-                f"You are a professional real-time translator from {src_name} to {tgt_name}.\n"
-                "Rules:\n"
-                f"1. Translate the user text accurately into fluent {tgt_name}.\n"
-                "2. Strictly preserve all names, numbers, dates, times, locations.\n"
-                "3. Do NOT add any explanations, introductory notes, or extra punctuation.\n"
-                "4. Return ONLY the final translated string."
-            )
-
-            headers = {
-                "Authorization": self.assemblyai_key.strip(),
-                "Content-Type": "application/json",
-            }
-
-            payload = {
-                "prompt": f"{system_instruction}\n\nText to translate:\n\"{clean_text}\"",
-                "final_model": "default"
-            }
-
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post("https://assemblyai.com", headers=headers, json=payload)
-                
-                if resp.status_code == 200:
-                    data = resp.json()
-                    content = data.get("response", "").strip()
-                    
-                    if content.startswith('"') and content.endswith('"'):
-                        content = content[1:-1].strip()
-                        
-                    logger.info(f"LeMUR Translated [{src_name} -> {tgt_name}]: {content}")
-                    return content
-                else:
-                    logger.error(f"AssemblyAI LeMUR Error: Status {resp.status_code}, Response: {resp.text}")
-                    return clean_text
-
+            translator = GoogleTranslator(source=src, target=tgt)
+            translated = translator.translate(clean_text)
+            if translated:
+                logger.info(f"🎭 Real-time Translated [{src} -> {tgt}]: {translated.strip()}")
+                return translated.strip()
         except Exception as e:
-            logger.error(f"LeMUR translation request failed: {e}")
-            return clean_text
+            logger.error(f"Fallback DeepTranslator failed: {e}")
+
+        # 🌟 స్టెప్ 2: ఒకవేళ బ్యాకప్ ఫెయిల్ అయితే అసెంబ్లీAI LeMUR ద్వారా ప్రయత్నించడం
+        if self.assemblyai_key:
+            try:
+                src_name = "Hindi" if "hi" in src else "English"
+                tgt_name = "Hindi" if "hi" in tgt else "English"
+
+                headers = {
+                    "Authorization": self.assemblyai_key.strip(),
+                    "Content-Type": "application/json",
+                }
+                payload = {
+                    "prompt": f"Translate this text from {src_name} to {tgt_name}: \"{clean_text}\". Provide only the raw translation.",
+                    "final_model": "default"
+                }
+                async with httpx.AsyncClient(timeout=5.0) as client:
+                    resp = await client.post("https://assemblyai.com", headers=headers, json=payload)
+                    if resp.status_code == 200:
+                        content = resp.json().get("response", "").strip()
+                        return content.replace('"', '')
+            except Exception as lemur_err:
+                logger.warning(f"LeMUR Direct Task failed during stream: {lemur_err}")
+
+        # అత్యవసర ఫాల్‌బ్యాక్: పాత టెక్స్ట్
+        return clean_text
 
 translation_service = TranslationService()

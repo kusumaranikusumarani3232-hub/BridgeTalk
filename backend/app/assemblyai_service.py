@@ -18,6 +18,7 @@ class AssemblyAIService:
         on_partial: Callable[[str], Awaitable[None]],
         on_final: Callable[[str], Awaitable[None]],
         on_status: Callable[[str, bool], Awaitable[None]],
+        language_code: str = "en"  # కరెక్ట్ భాషను గుర్తించడానికి యాడ్ చేసాము
     ) -> bool:
         """
         Establishes a raw WebSocket connection to AssemblyAI Realtime STT v3 API.
@@ -38,6 +39,10 @@ class AssemblyAIService:
         if "sample_rate=" not in url:
             delimiter = "&" if "?" in url else "?"
             url = f"{url}{delimiter}sample_rate=16000"
+            
+        # అసెంబ్లీAI కి లాంగ్వేజ్ కోడ్‌ని పంపుతున్నాము
+        delimiter = "&" if "?" in url else "?"
+        url = f"{url}{delimiter}language_code={language_code}"
 
         try:
             logger.info(f"Connecting to AssemblyAI Realtime WebSocket: {url}")
@@ -52,7 +57,6 @@ class AssemblyAIService:
             logger.info("Successfully connected to AssemblyAI Realtime API.")
             await on_status("Connected to AssemblyAI Realtime API", True)
 
-            # Start background listener loop for incoming STT transcript turns
             self.receiver_task = asyncio.create_task(
                 self._receive_loop(on_partial, on_final, on_status)
             )
@@ -65,9 +69,6 @@ class AssemblyAIService:
             return False
 
     async def send_audio_chunk(self, pcm_data: bytes):
-        """
-        Sends raw PCM16 audio bytes to AssemblyAI.
-        """
         if self.ws and self.is_connected:
             try:
                 await self.ws.send(pcm_data)
@@ -76,13 +77,9 @@ class AssemblyAIService:
                 self.is_connected = False
 
     async def disconnect(self):
-        """
-        Closes AssemblyAI connection cleanly by sending Terminate message.
-        """
         if self.ws and self.is_connected:
             logger.info("Sending Terminate signal to AssemblyAI...")
             try:
-                # Send explicit Terminate message per AssemblyAI v3 protocol
                 await self.ws.send(json.dumps({"type": "Terminate"}))
                 await asyncio.sleep(0.1)
                 await self.ws.close()
@@ -103,14 +100,11 @@ class AssemblyAIService:
         on_final: Callable[[str], Awaitable[None]],
         on_status: Callable[[str, bool], Awaitable[None]],
     ):
-        """
-        Internal loop listening for incoming events from AssemblyAI v3 WS.
-        """
         try:
             while self.ws and self.is_connected:
                 msg_raw = await self.ws.recv()
                 if isinstance(msg_raw, bytes):
-                    continue  # Ignore binary frames from server if any
+                    continue
 
                 data = json.loads(msg_raw)
                 msg_type = data.get("type")

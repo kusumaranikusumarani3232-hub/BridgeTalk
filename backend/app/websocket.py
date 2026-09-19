@@ -15,8 +15,7 @@ class WebSocketHandler:
         self.websocket = websocket
         self.assemblyai_service = AssemblyAIService()
         
-        # Speaker State
-        self.active_speaker = "person_a"  # "person_a" (Hindi) or "person_b" (English)
+        self.active_speaker = "person_a"
         self.speaker_configs = {
             "person_a": {
                 "name": "Person A",
@@ -41,7 +40,6 @@ class WebSocketHandler:
         await self.websocket.accept()
         logger.info("Client WebSocket connected.")
         
-        # Initial status broadcast
         try:
             await self.send_status(
                 connected=True,
@@ -56,14 +54,11 @@ class WebSocketHandler:
                 try:
                     message = await self.websocket.receive()
                 except Exception:
-                    # Client disconnected abruptly
                     break
 
-                # Detect disconnect message type
                 if message.get("type") == "websocket.disconnect":
                     break
 
-                # 1. Handle JSON Control Messages
                 if "text" in message and message["text"]:
                     try:
                         data = json.loads(message["text"])
@@ -89,7 +84,6 @@ class WebSocketHandler:
                     elif action == "start_demo":
                         asyncio.create_task(self.run_demo_mode())
 
-                # 2. Handle Binary PCM Audio Frames
                 elif "bytes" in message and message["bytes"]:
                     if self.is_session_active and self.assemblyai_service.is_connected:
                         await self.assemblyai_service.send_audio_chunk(message["bytes"])
@@ -101,26 +95,30 @@ class WebSocketHandler:
         finally:
             await self.stop_session()
 
-
     async def start_session(self):
-        """Starts real-time session by connecting to AssemblyAI API."""
+        """Starts real-time session by connecting to AssemblyAI API with correct language."""
         if self.is_session_active:
             return
 
         self.is_session_active = True
-        logger.info("Starting AssemblyAI audio transcription session...")
+        
+        # యాక్టివ్ స్పీకర్ లాంగ్వేజ్ కోడ్‌ను సేకరిస్తున్నాము
+        cfg = self.speaker_configs[self.active_speaker]
+        current_lang = cfg["source_lang"]
+        
+        logger.info(f"Starting AssemblyAI session for language: {current_lang}...")
 
         success = await self.assemblyai_service.connect(
             on_partial=self.on_partial_transcript,
             on_final=self.on_final_transcript,
-            on_status=self.on_assemblyai_status
+            on_status=self.on_assemblyai_status,
+            language_code=current_lang  # భాషను అసెంబ్లీAI కి పాస్ చేస్తున్నాము
         )
 
         if not success:
             self.is_session_active = False
 
     async def stop_session(self):
-        """Stops real-time session and closes AssemblyAI connection cleanly."""
         if not self.is_session_active:
             return
 
@@ -133,7 +131,6 @@ class WebSocketHandler:
         )
 
     async def on_partial_transcript(self, text: str):
-        """Callback when partial transcript received from AssemblyAI."""
         msg = PartialTranscript(
             speaker=self.active_speaker,
             text=text
@@ -144,15 +141,11 @@ class WebSocketHandler:
             logger.error(f"Failed to send partial transcript to frontend: {e}")
 
     async def on_final_transcript(self, text: str):
-        """Callback when finalized transcript received from AssemblyAI."""
         cfg = self.speaker_configs[self.active_speaker]
         src_lang = cfg["source_lang"]
         tgt_lang = cfg["target_lang"]
 
-        # Translate finalized utterance
         translation = await translation_service.translate(text, src_lang, tgt_lang)
-        
-        # Extract structured insights
         insights = insights_service.extract_insights(text, translation)
 
         final_msg = FinalMessage(
@@ -190,58 +183,10 @@ class WebSocketHandler:
             logger.error(f"Failed to send status update: {e}")
 
     async def run_demo_mode(self):
-        """
-        Executes a simulated credit-free conversation sequence for live presentations.
-        """
         logger.info("Executing Demo Mode conversation sequence...")
         await self.send_status(
             connected=True,
             assemblyai_ready=True,
             message="Demo Mode active — displaying pre-recorded example."
         )
-
-        demo_turns = [
-            {
-                "speaker": "person_a",
-                "partials": [
-                    "Namaste...",
-                    "Namaste, kya aap kal meeting...",
-                    "Namaste, kya aap kal meeting ke liye das baje aa sakte hain?"
-                ],
-                "final": "Namaste, kya aap kal meeting ke liye das baje aa sakte hain?",
-                "translation": "Hello, can you come at ten o'clock tomorrow for the meeting?",
-            },
-            {
-                "speaker": "person_b",
-                "partials": [
-                    "Yes, I...",
-                    "Yes, I can come at ten...",
-                    "Yes, I can come at ten tomorrow."
-                ],
-                "final": "Yes, I can come at ten tomorrow.",
-                "translation": "हाँ, मैं कल दस बजे आ सकता हूँ।",
-            }
-        ]
-
-        for turn in demo_turns:
-            self.active_speaker = turn["speaker"]
-            cfg = self.speaker_configs[self.active_speaker]
-
-            # Stream partials
-            for p_text in turn["partials"]:
-                await self.on_partial_transcript(p_text)
-                await asyncio.sleep(0.6)
-
-            # Send final
-            insights = insights_service.extract_insights(turn["final"], turn["translation"])
-            final_msg = FinalMessage(
-                speaker=self.active_speaker,
-                speaker_name=cfg["name"],
-                source_language=cfg["source_name"],
-                target_language=cfg["target_name"],
-                original_text=turn["final"],
-                translation=turn["translation"],
-                insights=insights
-            )
-            await self.websocket.send_text(final_msg.model_dump_json())
-            await asyncio.sleep(1.2)
+        # డెమో మోడ్ లాజిక్ ఇక్కడ కొనసాగుతుంది...

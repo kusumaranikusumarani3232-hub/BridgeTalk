@@ -15,7 +15,7 @@ class WebSocketHandler:
         self.websocket = websocket
         self.assemblyai_service = AssemblyAIService()
         
-        self.active_speaker = "person_a"
+        self.active_speaker = "person_a"  # "person_a" (Hindi) or "person_b" (English)
         self.speaker_configs = {
             "person_a": {
                 "name": "Person A",
@@ -59,6 +59,7 @@ class WebSocketHandler:
                 if message.get("type") == "websocket.disconnect":
                     break
 
+                # 1. Handle JSON Control Messages
                 if "text" in message and message["text"]:
                     try:
                         data = json.loads(message["text"])
@@ -72,18 +73,35 @@ class WebSocketHandler:
                         await self.stop_session()
                     elif action == "set_speaker":
                         speaker = data.get("speaker", "person_a")
-                        if speaker in self.speaker_configs:
+                        if speaker in self.speaker_configs and speaker != self.active_speaker:
                             self.active_speaker = speaker
                             cfg = self.speaker_configs[speaker]
-                            logger.info(f"Active speaker set to: {speaker} ({cfg['name']})")
+                            logger.info(f"Switching active speaker to: {speaker} ({cfg['name']})")
+                            
+                            # 🌟 అత్యంత ముఖ్యం: స్పీకర్ మారినప్పుడు అసెంబ్లీAI వెబ్‌సాకెట్‌ను కొత్త లాంగ్వేజ్‌తో రీస్టార్ట్ చేయడం
+                            if self.is_session_active:
+                                logger.info("Re-connecting AssemblyAI stream with new language context...")
+                                await self.assemblyai_service.disconnect()
+                                
+                                current_lang = cfg["source_lang"]
+                                success = await self.assemblyai_service.connect(
+                                    on_partial=self.on_partial_transcript,
+                                    on_final=self.on_final_transcript,
+                                    on_status=self.on_assemblyai_status,
+                                    language_code=current_lang
+                                )
+                                if not success:
+                                    self.is_session_active = False
+
                             await self.send_status(
                                 connected=True,
                                 assemblyai_ready=self.assemblyai_service.is_connected,
-                                message=f"Active speaker: {cfg['name']} ({cfg['source_name']} → {cfg['target_name']})"
+                                message=f"Active speaker updated: {cfg['name']} ({cfg['source_name']} → {cfg['target_name']})"
                             )
                     elif action == "start_demo":
                         asyncio.create_task(self.run_demo_mode())
 
+                # 2. Handle Binary PCM Audio Frames
                 elif "bytes" in message and message["bytes"]:
                     if self.is_session_active and self.assemblyai_service.is_connected:
                         await self.assemblyai_service.send_audio_chunk(message["bytes"])
@@ -102,7 +120,6 @@ class WebSocketHandler:
 
         self.is_session_active = True
         
-        # యాక్టివ్ స్పీకర్ లాంగ్వేజ్ కోడ్‌ను సేకరిస్తున్నాము
         cfg = self.speaker_configs[self.active_speaker]
         current_lang = cfg["source_lang"]
         
@@ -112,7 +129,7 @@ class WebSocketHandler:
             on_partial=self.on_partial_transcript,
             on_final=self.on_final_transcript,
             on_status=self.on_assemblyai_status,
-            language_code=current_lang  # భాషను అసెంబ్లీAI కి పాస్ చేస్తున్నాము
+            language_code=current_lang
         )
 
         if not success:
@@ -145,6 +162,7 @@ class WebSocketHandler:
         src_lang = cfg["source_lang"]
         tgt_lang = cfg["target_lang"]
 
+        # ఇక్కడ టెక్స్ట్ ఖచ్చితమైన హిందీలో లేదా ఇంగ్లీష్ లో వస్తుంది, కాబట్టి పక్కాగా అనువాదం జరుగుతుంది
         translation = await translation_service.translate(text, src_lang, tgt_lang)
         insights = insights_service.extract_insights(text, translation)
 
@@ -189,4 +207,3 @@ class WebSocketHandler:
             assemblyai_ready=True,
             message="Demo Mode active — displaying pre-recorded example."
         )
-        # డెమో మోడ్ లాజిక్ ఇక్కడ కొనసాగుతుంది...

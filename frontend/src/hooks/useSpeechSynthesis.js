@@ -21,7 +21,6 @@ export function useSpeechSynthesis() {
   useEffect(() => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
       updateVoices();
-
       window.speechSynthesis.onvoiceschanged = updateVoices;
     }
 
@@ -48,11 +47,9 @@ export function useSpeechSynthesis() {
 
       const speech = window.speechSynthesis;
 
-      // Invalidate any previously scheduled speech sequence
+      // ఇంజిన్ రీసెట్ మరియు పాత స్పీచ్ క్యాన్సిల్
       speechIdRef.current += 1;
       const currentSpeechId = speechIdRef.current;
-
-      // Cancel any current speech in Chrome queue
       speech.cancel();
 
       let availableVoices = speech.getVoices();
@@ -60,28 +57,23 @@ export function useSpeechSynthesis() {
         availableVoices = voicesRef.current;
       }
 
+      // లాంగ్వేజ్ చెకింగ్ - హిందీని మరింత పక్కాగా గుర్తించడానికి
       const langLower = String(langCode || '').toLowerCase();
       const isHindi =
-        langLower.includes('hindi') || langLower.startsWith('hi');
+        langLower.includes('hindi') ||
+        langLower.startsWith('hi') ||
+        /[\u0900-\u097F]/.test(cleanText); // హిందీ అక్షరాలు (Devanagari) ఉంటే ఆటోమేటిక్‌గా ట్రూ అవుతుంది
 
       let matchingVoice;
       if (isHindi) {
         matchingVoice =
           availableVoices.find(
             (voice) =>
-              voice.name === 'Google हिन्दी' &&
-              voice.lang.toLowerCase().includes('hi')
-          ) ||
-          availableVoices.find(
-            (voice) => voice.name === 'Google हिन्दी'
-          ) ||
-          availableVoices.find(
-            (voice) =>
-              voice.name.includes('Google') &&
+              (voice.name.includes('Google') || voice.name.includes('Microsoft')) &&
               voice.lang.toLowerCase().includes('hi')
           ) ||
           availableVoices.find((voice) =>
-            voice.lang.toLowerCase().includes('hi')
+            voice.lang.toLowerCase().startsWith('hi')
           );
       } else {
         matchingVoice =
@@ -96,14 +88,13 @@ export function useSpeechSynthesis() {
           );
       }
 
-      // Hindi Chrome TTS fails/stops on long text payloads.
-      // Break long Hindi text into short ~6-word chunks to prevent Chrome TTS silent failures.
-      const words = cleanText.split(/\s+/);
+      // హిందీ టెక్స్ట్ సైజ్ బట్టి ముక్కలుగా విడదీయడం (Safe Chunking)
       const chunks = [];
-
-      if (isHindi && words.length > 7) {
-        for (let i = 0; i < words.length; i += 6) {
-          chunks.push(words.slice(i, i + 6).join(' '));
+      if (isHindi) {
+        // హిందీకి పదాల కంటే క్యారెక్టర్ల (Characters) బట్టి ముక్కలు చేయడం సురక్షితం (ప్రతి 60 అక్షరాలకు ఒక ముక్క)
+        const size = 60;
+        for (let i = 0; i < cleanText.length; i += size) {
+          chunks.push(cleanText.substring(i, i + size));
         }
       } else {
         chunks.push(cleanText);
@@ -112,10 +103,7 @@ export function useSpeechSynthesis() {
       utteranceRef.current = [];
 
       const speakChunk = (index) => {
-        if (currentSpeechId !== speechIdRef.current) {
-          return;
-        }
-
+        if (currentSpeechId !== speechIdRef.current) return;
         if (index >= chunks.length) {
           utteranceRef.current = [];
           return;
@@ -123,64 +111,47 @@ export function useSpeechSynthesis() {
 
         const utterance = new SpeechSynthesisUtterance(chunks[index]);
 
-        utterance.lang = matchingVoice
-          ? matchingVoice.lang
-          : isHindi
-            ? 'hi-IN'
-            : 'en-US';
-
+        // వాయిస్ సెట్టింగ్స్
+        utterance.lang = matchingVoice ? matchingVoice.lang : (isHindi ? 'hi-IN' : 'en-US');
         if (matchingVoice) {
           utterance.voice = matchingVoice;
         }
 
-        utterance.rate = isHindi ? 0.85 : 1.0;
+        // హిందీకి 0.85 స్పీడ్ స్లోగా ఉండటం వల్ల క్రోమ్ ఆగిపోవచ్చు, అందుకే 0.9 లేదా 1.0 కి మార్చడమైనది
+        utterance.rate = isHindi ? 0.95 : 1.0;
         utterance.pitch = 1.0;
         utterance.volume = 1.0;
 
         utterance.onstart = () => {
-          console.log('🔊 TTS playback started chunk:', {
-            index,
-            totalChunks: chunks.length,
-            lang: utterance.lang,
-            voice: matchingVoice?.name || 'default',
-            text: chunks[index],
-          });
+          console.log('🔊 TTS Started:', chunks[index]);
         };
 
         utterance.onend = () => {
-          if (currentSpeechId !== speechIdRef.current) {
-            return;
-          }
-          console.log(`🔊 TTS chunk ${index + 1}/${chunks.length} completed.`);
+          if (currentSpeechId !== speechIdRef.current) return;
           setTimeout(() => {
             speakChunk(index + 1);
-          }, 100);
+          }, 50); // చంక్స్ మధ్య గ్యాప్ తగ్గించబడింది
         };
 
         utterance.onerror = (event) => {
-          console.warn('🔊 SpeechSynthesis error event:', {
-            error: event.error,
-            language: utterance.lang,
-            voice: matchingVoice?.name,
-            text: chunks[index],
-          });
-          if (currentSpeechId === speechIdRef.current) {
-            utteranceRef.current = [];
+          console.warn('🔊 TTS Error:', event.error);
+          // ఒకవేళ క్రోమ్ అడ్డుకుంటే (interrupted) మళ్లీ ప్రయత్నించడానికి
+          if (event.error === 'interrupted' && currentSpeechId === speechIdRef.current) {
+            // సిస్టమ్ ఆగిపోకుండా నెక్స్ట్ ముక్కకు వెళ్తుంది
+            speakChunk(index + 1);
           }
         };
 
-        // Keep active utterances in ref to prevent Chrome garbage collection mid-speech
         utteranceRef.current.push(utterance);
-
         speech.speak(utterance);
       };
 
-      // Allow 200ms after cancel() for browser speech queue to settle before starting chunk sequence
+      // బ్రౌజర్ క్యూ సెటిల్ అవ్వడానికి సమయం (Timeout 300ms కి పెంచబడింది)
       setTimeout(() => {
         if (currentSpeechId === speechIdRef.current) {
           speakChunk(0);
         }
-      }, 200);
+      }, 300);
     },
     [speakEnabled]
   );

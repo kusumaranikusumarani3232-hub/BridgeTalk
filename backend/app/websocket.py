@@ -158,21 +158,41 @@ class WebSocketHandler:
             logger.error(f"Failed to send partial transcript to frontend: {e}")
 
     async def on_final_transcript(self, text: str):
-        cfg = self.speaker_configs[self.active_speaker]
-        src_lang = cfg["source_lang"]
-        tgt_lang = cfg["target_lang"]
+        """
+        Ultimate Hackathon Override for Final Transcript.
+        Forces the translation field to have the opposite language no matter what.
+        """
+        clean_text = text.strip()
+        
+        # 1. ఇన్‌కమింగ్ టెక్స్ట్ ఏ భాషలో ఉందో ఇక్కడే కనిపెట్టడం
+        import re
+        from deep_translator import GoogleTranslator
+        
+        has_hindi = bool(re.search(r"[\u0900-\u097F]", clean_text ))
+        
+        # 2. ఇక్కడే డైరెక్ట్‌గా గూగుల్ ట్రాన్స్‌లేటర్ ద్వారా ఫోర్స్డ్‌గా మార్చడం
+        forced_translation = clean_text
+        try:
+            if fundraising_or_hindi_check := has_hindi:
+                # హిందీ ఉంటే ఇంగ్లీషులోకి మార్చు
+                forced_translation = GoogleTranslator(source="hi", target="en").translate(clean_text)
+            else:
+                # ఇంగ్లీష్ ఉంటే హిందీలోకి మార్చు
+                forced_translation = GoogleTranslator(source="en", target="hi").translate(clean_text)
+        except Exception as e:
+            logger.error(f"Forced websocket translation fail: {e}")
 
-        # ఇక్కడ టెక్స్ట్ ఖచ్చితమైన హిందీలో లేదా ఇంగ్లీష్ లో వస్తుంది, కాబట్టి పక్కాగా అనువాదం జరుగుతుంది
-        translation = await translation_service.translate(text, src_lang, tgt_lang)
-        insights = insights_service.extract_insights(text, translation)
+        # 3. మీ ఒరిజినల్ వేరియబుల్స్ ఏమున్నా సరే, ఫోర్స్డ్ డేటాను పంపడం
+        cfg = self.speaker_configs[self.active_speaker]
+        insights = insights_service.extract_insights(clean_text, forced_translation)
 
         final_msg = FinalMessage(
             speaker=self.active_speaker,
             speaker_name=cfg["name"],
             source_language=cfg["source_name"],
             target_language=cfg["target_name"],
-            original_text=text,
-            translation=translation,
+            original_text=clean_text,
+            translation=forced_translation, # 🌟 ఇక్కడ పక్కాగా ఫోర్స్డ్ అనువాదం వెళ్తుంది
             insights=insights
         )
 
@@ -180,6 +200,7 @@ class WebSocketHandler:
             await self.websocket.send_text(final_msg.model_dump_json())
         except Exception as e:
             logger.error(f"Failed to send final transcript to frontend: {e}")
+
 
     async def on_assemblyai_status(self, message: str, ready: bool):
         await self.send_status(

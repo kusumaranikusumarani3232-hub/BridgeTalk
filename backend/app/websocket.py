@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from fastapi import WebSocket, WebSocketDisconnect
 from app.assemblyai_service import AssemblyAIService
 from app.translation_service import translation_service
@@ -159,41 +160,54 @@ class WebSocketHandler:
 
     async def on_final_transcript(self, text: str):
         """
-        Ultimate Hackathon Override for Final Transcript.
-        Forces the translation field to have the opposite language no matter what.
+        Routes the final transcript through the LeMUR-backed translation_service.
+        Script detection (Devanagari vs Latin) determines translation direction.
         """
         clean_text = text.strip()
-        
-        # 1. ఇన్‌కమింగ్ టెక్స్ట్ ఏ భాషలో ఉందో ఇక్కడే కనిపెట్టడం
-        import re
-        from deep_translator import GoogleTranslator
-        
-        has_hindi = bool(re.search(r"[\u0900-\u097F]", clean_text ))
-        
-        # 2. ఇక్కడే డైరెక్ట్‌గా గూగుల్ ట్రాన్స్‌లేటర్ ద్వారా ఫోర్స్డ్‌గా మార్చడం
-        forced_translation = clean_text
-        try:
-            if fundraising_or_hindi_check := has_hindi:
-                # హిందీ ఉంటే ఇంగ్లీషులోకి మార్చు
-                forced_translation = GoogleTranslator(source="hi", target="en").translate(clean_text)
-            else:
-                # ఇంగ్లీష్ ఉంటే హిందీలోకి మార్చు
-                forced_translation = GoogleTranslator(source="en", target="hi").translate(clean_text)
-        except Exception as e:
-            logger.error(f"Forced websocket translation fail: {e}")
+        if not clean_text:
+            return
 
-        # 3. మీ ఒరిజినల్ వేరియబుల్స్ ఏమున్నా సరే, ఫోర్స్డ్ డేటాను పంపడం
         cfg = self.speaker_configs[self.active_speaker]
-        insights = insights_service.extract_insights(clean_text, forced_translation)
+
+        # Determine translation direction from script content, not just speaker config,
+        # so the system stays correct even if the active speaker label lags.
+        has_hindi = bool(re.search(r"[\u0900-\u097F]", clean_text))
+        if has_hindi:
+            source_lang, target_lang = "hi", "en"
+        else:
+            source_lang, target_lang = "en", "hi"
+
+        # Call LeMUR (with instant fallback map for demo sentences)
+        try:
+            translation = await translation_service.translate(
+                text=clean_text,
+                source_lang=source_lang,
+                target_lang=target_lang,
+            )
+        except Exception as exc:
+            logger.error(f"translation_service.translate error: {exc}")
+            translation = clean_text
+
+        # If person_a (Hindi speaker) sends text that got transcribed in English by ASR,
+        # replace original_text with the Hindi translation so the frontend layout
+        # shows Hindi on the left and English on the right consistently.
+        if self.active_speaker == "person_a" and not has_hindi and translation != clean_text:
+            display_original = translation   # show Hindi as original
+            display_translation = clean_text  # show English as translation
+        else:
+            display_original = clean_text
+            display_translation = translation
+
+        insights = insights_service.extract_insights(display_original, display_translation)
 
         final_msg = FinalMessage(
             speaker=self.active_speaker,
             speaker_name=cfg["name"],
             source_language=cfg["source_name"],
             target_language=cfg["target_name"],
-            original_text=clean_text,
-            translation=forced_translation, # 🌟 ఇక్కడ పక్కాగా ఫోర్స్డ్ అనువాదం వెళ్తుంది
-            insights=insights
+            original_text=display_original,
+            translation=display_translation,
+            insights=insights,
         )
 
         try:

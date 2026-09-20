@@ -57,7 +57,17 @@ export function useWebSocket() {
         } else if (data.type === 'final') {
           setPartialTranscript(null);
           if (data.speaker) setActiveSpeakerState(data.speaker);
-          setMessages((prev) => [...prev, data]);
+          const finalPayload = {
+            id: data.id || Date.now(),
+            speaker: data.speaker,
+            speaker_name: data.speaker_name,
+            source_language: data.source_language,
+            target_language: data.target_language,
+            original_text: data.original_text,
+            translation: data.translation || data.original_text,
+            insights: data.insights || [],
+          };
+          setMessages((prev) => [...prev, finalPayload]);
           if (data.insights && data.insights.length > 0) {
             setInsights((prev) => {
               // Merge insights without duplicates

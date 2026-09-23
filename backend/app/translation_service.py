@@ -29,6 +29,11 @@ _FALLBACK_MAP: dict[str, str] = {
     "hello!":                         "नमस्ते",
     "hi!":                            "नमस्ते",
     # Hindi → English
+    "mera nam kusuma":               "My name is Kusuma.",
+    "mera naam kusuma":              "My name is Kusuma.",
+    "mera nam kusuma hai":           "My name is Kusuma.",
+    "mera naam kusuma hai":          "My name is Kusuma.",
+    "mera naam kusuma hai.":         "My name is Kusuma.",
     "आपका नाम क्या है?":             "What's your name?",
     "आपका नाम क्या है":              "What's your name?",
     "क्या है आपका नाम?":             "What's your name?",
@@ -150,9 +155,17 @@ class TranslationService:
         if not clean_text:
             return ""
 
+        source_code = source_lang.lower().split("-")[0]
+        target_code = target_lang.lower().split("-")[0]
+
         # Suppress microphone noise / filler words
         if clean_text.lower() in _NOISE_WORDS:
             return "..."
+
+        # Avoid translating English into Hindi for the English bot, and avoid
+        # rewriting text when callers explicitly request the same language.
+        if source_code == target_code:
+            return clean_text
 
         # --- 1. Hardcoded fallback map (instant, zero-latency) ---------------
         fallback = _fallback_lookup(clean_text)
@@ -160,21 +173,29 @@ class TranslationService:
             logger.info(f"Fallback map hit: {clean_text!r} → {fallback!r}")
             return fallback
 
-        # --- 2. Detect script direction automatically ------------------------
+        # --- 2. Choose the configured target direction ----------------------
         has_hindi = _has_devanagari(clean_text)
         has_eng   = _has_latin(clean_text)
 
-        if has_hindi and not has_eng:
-            # Pure Devanagari → English
+        if target_code == "en":
+            # Hindi bot input can be romanized by ASR, so trust its configured
+            # source language even when the transcript uses Latin letters.
+            if source_code == "hi" or has_hindi:
+                direction = "hi_to_en"
+            else:
+                return clean_text
+        elif target_code == "hi":
+            if source_code == "en" or has_eng:
+                direction = "en_to_hi"
+            else:
+                return clean_text
+        elif has_hindi and not has_eng:
             direction = "hi_to_en"
         elif has_eng and not has_hindi:
-            # Pure Latin → Hindi
             direction = "en_to_hi"
         elif has_hindi and has_eng:
-            # Mixed (Hinglish typed in Devanagari) — treat as Hindi → English
             direction = "hi_to_en"
         else:
-            # Fallback: honour caller's source/target hint
             direction = "en_to_hi" if source_lang == "en" else "hi_to_en"
 
         # --- 3. LeMUR API call -----------------------------------------------

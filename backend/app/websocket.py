@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import re
 from fastapi import WebSocket, WebSocketDisconnect
 from app.assemblyai_service import AssemblyAIService
 from app.translation_service import translation_service
@@ -161,7 +160,8 @@ class WebSocketHandler:
     async def on_final_transcript(self, text: str):
         """
         Routes the final transcript through the LeMUR-backed translation_service.
-        Script detection (Devanagari vs Latin) determines translation direction.
+        Speaker configuration determines the source language. Both speakers' translated
+        output is English, and English speech is passed through unchanged.
         """
         clean_text = text.strip()
         if not clean_text:
@@ -169,13 +169,8 @@ class WebSocketHandler:
 
         cfg = self.speaker_configs[self.active_speaker]
 
-        # Determine translation direction from script content, not just speaker config,
-        # so the system stays correct even if the active speaker label lags.
-        has_hindi = bool(re.search(r"[\u0900-\u097F]", clean_text))
-        if has_hindi:
-            source_lang, target_lang = "hi", "en"
-        else:
-            source_lang, target_lang = "en", "hi"
+        source_lang = cfg["source_lang"]
+        target_lang = cfg["target_lang"]
 
         # Call LeMUR (with instant fallback map for demo sentences)
         try:
@@ -188,15 +183,8 @@ class WebSocketHandler:
             logger.error(f"translation_service.translate error: {exc}")
             translation = clean_text
 
-        # If person_a (Hindi speaker) sends text that got transcribed in English by ASR,
-        # replace original_text with the Hindi translation so the frontend layout
-        # shows Hindi on the left and English on the right consistently.
-        if self.active_speaker == "person_a" and not has_hindi and translation != clean_text:
-            display_original = translation   # show Hindi as original
-            display_translation = clean_text  # show English as translation
-        else:
-            display_original = clean_text
-            display_translation = translation
+        display_original = clean_text
+        display_translation = translation
 
         insights = insights_service.extract_insights(display_original, display_translation)
 

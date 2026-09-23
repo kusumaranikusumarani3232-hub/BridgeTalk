@@ -16,6 +16,11 @@ _FALLBACK_MAP: dict[str, str] = {
     "my name is kusma":               "मेरा नाम कुसुमा है।",
     "my name is kusuma.":             "मेरा नाम कुसुमा है।",
     "my name is kusma.":              "मेरा नाम कुसुमा है।",
+    "hello, my name is kusma":        "नमस्ते, मेरा नाम कुसमा है।",
+    "hello, my name is kusma.":       "नमस्ते, मेरा नाम कुसमा है।",
+    "hello my name is kusma":         "नमस्ते, मेरा नाम कुसमा है।",
+    "hello, my name is kusuma":       "नमस्ते, मेरा नाम कुसुमा है।",
+    "hello, my name is kusuma.":      "नमस्ते, मेरा नाम कुसुमा है।",
     "what is your name":              "आपका नाम क्या है?",
     "what is your name?":             "आपका नाम क्या है?",
     "whats your name":                "आपका नाम क्या है?",
@@ -45,6 +50,8 @@ _FALLBACK_MAP: dict[str, str] = {
     "क्या आप मेरी मदद कर सकते हैं?": "Can you help me?",
     "क्या आप मेरी मदद कर सकते हैं":  "Can you help me?",
     "नमस्ते":                        "Hello!",
+    "आप कैसे हैं?":                  "How are you?",
+    "आप कैसे हैं":                   "How are you?",
 }
 
 # Noise words that signal microphone artefacts — suppress them

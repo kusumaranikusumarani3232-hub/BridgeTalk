@@ -16,7 +16,7 @@ class AssemblyAIService:
     async def connect(
         self,
         on_partial: Callable[[str], Awaitable[None]],
-        on_final: Callable[[str], Awaitable[None]],
+        on_final: Callable[..., Awaitable[None]],
         on_status: Callable[[str, bool], Awaitable[None]],
         language_code: str = "en"  # కరెక్ట్ భాషను గుర్తించడానికి యాడ్ చేసాము
     ) -> bool:
@@ -121,7 +121,7 @@ class AssemblyAIService:
                     if text:
                         if end_of_turn:
                             logger.info(f"Final Transcript: {text}")
-                            await on_final(text)
+                            await on_final(text, data)
                         else:
                             await on_partial(text)
 

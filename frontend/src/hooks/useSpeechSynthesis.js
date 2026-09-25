@@ -5,7 +5,9 @@ export function useSpeechSynthesis() {
   const [voices, setVoices] = useState([]);
   const voicesRef = useRef([]);
   const utteranceRef = useRef([]);
-  const speechIdRef = useRef(0);
+  const queueRef = useRef([]);
+  const speakingRef = useRef(false);
+  const speakRef = useRef(null);
 
   const updateVoices = useCallback(() => {
     if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
@@ -26,6 +28,8 @@ export function useSpeechSynthesis() {
 
     return () => {
       if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+        queueRef.current = [];
+        speakingRef.current = false;
         window.speechSynthesis.cancel();
       }
     };
@@ -46,11 +50,6 @@ export function useSpeechSynthesis() {
       if (!cleanText) return;
 
       const speech = window.speechSynthesis;
-
-      // ఇంజిన్ రీసెట్ మరియు పాత స్పీచ్ క్యాన్సిల్
-      speechIdRef.current += 1;
-      const currentSpeechId = speechIdRef.current;
-      speech.cancel();
 
       let availableVoices = speech.getVoices();
       if (!availableVoices.length) {
@@ -88,73 +87,43 @@ export function useSpeechSynthesis() {
           );
       }
 
-      // హిందీ టెక్స్ట్ సైజ్ బట్టి ముక్కలుగా విడదీయడం (Safe Chunking)
-      const chunks = [];
-      if (isHindi) {
-        // హిందీకి పదాల కంటే క్యారెక్టర్ల (Characters) బట్టి ముక్కలు చేయడం సురక్షితం (ప్రతి 60 అక్షరాలకు ఒక ముక్క)
-        const size = 60;
-        for (let i = 0; i < cleanText.length; i += size) {
-          chunks.push(cleanText.substring(i, i + size));
-        }
-      } else {
-        chunks.push(cleanText);
+      const utterance = new SpeechSynthesisUtterance(cleanText);
+
+      // వాయిస్ సెట్టింగ్స్
+      utterance.lang = matchingVoice ? matchingVoice.lang : (isHindi ? 'hi-IN' : 'en-US');
+      if (matchingVoice) {
+        utterance.voice = matchingVoice;
       }
 
-      utteranceRef.current = [];
+      // హిందీకి 0.85 స్పీడ్ స్లోగా ఉండటం వల్ల క్రోమ్ ఆగిపోవచ్చు, అందుకే 0.9 లేదా 1.0 కి మార్చడమైనది
+      utterance.rate = isHindi ? 0.95 : 1.0;
+      utterance.pitch = 1.0;
+      utterance.volume = 1.0;
 
-      const speakChunk = (index) => {
-        if (currentSpeechId !== speechIdRef.current) return;
-        if (index >= chunks.length) {
-          utteranceRef.current = [];
-          return;
-        }
-
-        const utterance = new SpeechSynthesisUtterance(chunks[index]);
-
-        // వాయిస్ సెట్టింగ్స్
-        utterance.lang = matchingVoice ? matchingVoice.lang : (isHindi ? 'hi-IN' : 'en-US');
-        if (matchingVoice) {
-          utterance.voice = matchingVoice;
-        }
-
-        // హిందీకి 0.85 స్పీడ్ స్లోగా ఉండటం వల్ల క్రోమ్ ఆగిపోవచ్చు, అందుకే 0.9 లేదా 1.0 కి మార్చడమైనది
-        utterance.rate = isHindi ? 0.95 : 1.0;
-        utterance.pitch = 1.0;
-        utterance.volume = 1.0;
-
-        utterance.onstart = () => {
-          console.log('🔊 TTS Started:', chunks[index]);
-        };
-
-        utterance.onend = () => {
-          if (currentSpeechId !== speechIdRef.current) return;
-          setTimeout(() => {
-            speakChunk(index + 1);
-          }, 50); // చంక్స్ మధ్య గ్యాప్ తగ్గించబడింది
-        };
-
-        utterance.onerror = (event) => {
-          console.warn('🔊 TTS Error:', event.error);
-          // ఒకవేళ క్రోమ్ అడ్డుకుంటే (interrupted) మళ్లీ ప్రయత్నించడానికి
-          if (event.error === 'interrupted' && currentSpeechId === speechIdRef.current) {
-            // సిస్టమ్ ఆగిపోకుండా నెక్స్ట్ ముక్కకు వెళ్తుంది
-            speakChunk(index + 1);
-          }
-        };
-
-        utteranceRef.current.push(utterance);
-        speech.speak(utterance);
+      utterance.onstart = () => console.log('🔊 TTS Started:', cleanText);
+      const finish = () => {
+        speakingRef.current = false;
+        utteranceRef.current = [];
+        speakRef.current?.();
       };
-
-      // బ్రౌజర్ క్యూ సెటిల్ అవ్వడానికి సమయం (Timeout 300ms కి పెంచబడింది)
-      setTimeout(() => {
-        if (currentSpeechId === speechIdRef.current) {
-          speakChunk(0);
-        }
-      }, 300);
+      utterance.onend = finish;
+      utterance.onerror = (event) => {
+        console.warn('🔊 TTS Error:', event.error);
+        finish();
+      };
+      queueRef.current.push(utterance);
+      speakRef.current?.();
     },
     [speakEnabled]
   );
+
+  speakRef.current = () => {
+    if (speakingRef.current || !queueRef.current.length) return;
+    const next = queueRef.current.shift();
+    speakingRef.current = true;
+    utteranceRef.current = [next];
+    window.speechSynthesis.speak(next);
+  };
 
   return {
     speakEnabled,

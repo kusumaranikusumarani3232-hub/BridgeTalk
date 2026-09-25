@@ -42,7 +42,7 @@ export function ConversationList({ messages, onSpeakText }) {
                   </div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
                     <span>{msg.timestamp}</span>
-                    {onSpeakText && (
+                    {onSpeakText && msg.translation_status === 'translated' && (
                       <button
                         className="tts-btn"
                         title="Speak translation aloud"
@@ -68,7 +68,7 @@ export function ConversationList({ messages, onSpeakText }) {
                       {msg.target_language} Translation:
                     </div>
                     <div className="msg-translation-text">
-                      "{msg.translation}"
+                      {msg.translation_status === 'translated' ? `"${msg.translation}"` : 'Translation failed. Please try this turn again.'}
                     </div>
                   </div>
                 </div>

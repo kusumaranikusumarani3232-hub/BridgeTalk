@@ -43,43 +43,22 @@ export default function App() {
     speak,
   } = useSpeechSynthesis();
 
-  const lastSpokenIdRef = React.useRef(null);
+  const spokenIdsRef = React.useRef(new Set());
 
   // Speak each new final message only once when speech is enabled
   useEffect(() => {
-    if (!speakEnabled || messages.length === 0) {
+    if (messages.length === 0) {
       return;
     }
 
-    const latestMsg = messages[messages.length - 1];
-
-    if (
-      !latestMsg?.id ||
-      lastSpokenIdRef.current === latestMsg.id
-    ) {
-      return;
-    }
-
-    lastSpokenIdRef.current = latestMsg.id;
-
-    const targetLanguage = String(
-      latestMsg.target_language || ''
-    ).toLowerCase();
-
-    const targetLangCode =
-      targetLanguage.includes('hindi') ||
-        targetLanguage === 'hi'
-        ? 'hi'
-        : 'en';
-
-    console.log('🔊 Speaking new message:', {
-      id: latestMsg.id,
-      text: latestMsg.translation,
-      target_language: latestMsg.target_language,
-      targetLangCode,
+    messages.forEach((message) => {
+      if (!message?.id || spokenIdsRef.current.has(message.id)) return;
+      spokenIdsRef.current.add(message.id);
+      if (!speakEnabled || message.translation_status !== 'translated' || !message.translation) return;
+      const targetLanguage = String(message.target_language || '').toLowerCase();
+      const targetLangCode = targetLanguage.includes('hindi') || targetLanguage === 'hi' ? 'hi' : 'en';
+      speak(message.translation, targetLangCode);
     });
-
-    speak(latestMsg.translation, targetLangCode);
   }, [messages, speakEnabled, speak]);
 
   const handleStartConversation = async () => {

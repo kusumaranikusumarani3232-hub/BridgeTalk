@@ -76,18 +76,17 @@ describe('useSpeechSynthesis hook unit tests', () => {
       result.current.speak('नमस्ते', 'hi');
     });
 
-    expect(mockCancelFn).toHaveBeenCalled();
-    vi.advanceTimersByTime(250);
+    expect(mockCancelFn).not.toHaveBeenCalled();
 
     expect(mockSpeakFn).toHaveBeenCalledTimes(1);
     expect(createdUtterances.length).toBe(1);
     expect(createdUtterances[0].text).toBe('नमस्ते');
     expect(createdUtterances[0].lang).toBe('hi-IN');
     expect(createdUtterances[0].voice.name).toBe('Google हिन्दी');
-    expect(createdUtterances[0].rate).toBe(0.85);
+    expect(createdUtterances[0].rate).toBe(0.95);
   });
 
-  it('chunks long Hindi text into multiple short utterances played sequentially', () => {
+  it('speaks long Hindi text in one utterance without arbitrary chunking', () => {
     const { result } = renderHook(() => useSpeechSynthesis());
 
     act(() => {
@@ -101,27 +100,10 @@ describe('useSpeechSynthesis hook unit tests', () => {
       result.current.speak(longHindiText, 'hi');
     });
 
-    expect(mockCancelFn).toHaveBeenCalled();
-    vi.advanceTimersByTime(250);
-
-    // First chunk spoken
     expect(mockSpeakFn).toHaveBeenCalledTimes(1);
     expect(createdUtterances.length).toBe(1);
-    expect(createdUtterances[0].text).toBe('क्या हम कल सुबह दस बजे');
+    expect(createdUtterances[0].text).toBe(longHindiText);
     expect(createdUtterances[0].lang).toBe('hi-IN');
-
-    // Simulate first chunk ending
-    act(() => {
-      if (createdUtterances[0].onend) {
-        createdUtterances[0].onend();
-      }
-    });
-    vi.advanceTimersByTime(150);
-
-    // Second chunk spoken
-    expect(mockSpeakFn).toHaveBeenCalledTimes(2);
-    expect(createdUtterances.length).toBe(2);
-    expect(createdUtterances[1].text).toBe('मीटिंग कर सकते हैं');
   });
 
   it('speaks English sentence with en-US voice and rate 1.0', () => {
@@ -137,12 +119,23 @@ describe('useSpeechSynthesis hook unit tests', () => {
       result.current.speak(englishText, 'en');
     });
 
-    vi.advanceTimersByTime(250);
-
     expect(mockSpeakFn).toHaveBeenCalledTimes(1);
     expect(createdUtterances[0].text).toBe(englishText);
     expect(createdUtterances[0].lang).toBe('en-US');
     expect(createdUtterances[0].voice.name).toBe('Google US English');
     expect(createdUtterances[0].rate).toBe(1.0);
+  });
+
+  it('queues utterances and starts the next only after the current one ends', () => {
+    const { result } = renderHook(() => useSpeechSynthesis());
+    act(() => result.current.setSpeakEnabled(true));
+    act(() => {
+      result.current.speak('first', 'en');
+      result.current.speak('second', 'en');
+    });
+    expect(mockSpeakFn).toHaveBeenCalledTimes(1);
+    act(() => createdUtterances[0].onend());
+    expect(mockSpeakFn).toHaveBeenCalledTimes(2);
+    expect(createdUtterances[1].text).toBe('second');
   });
 });

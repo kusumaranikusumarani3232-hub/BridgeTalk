@@ -30,7 +30,8 @@ class FinalMessage(BaseModel):
     source_language: str
     target_language: str
     original_text: str
-    translation: str
+    translation: str = ""
+    translation_status: str = "translated"
     insights: List[InsightItem] = []
     timestamp: str = Field(default_factory=lambda: time.strftime("%H:%M:%S"))
 

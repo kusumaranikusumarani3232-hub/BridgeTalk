@@ -6,6 +6,10 @@ from app.config import settings
 
 logger = logging.getLogger("bridgetalk.translation")
 
+
+class TranslationError(RuntimeError):
+    """Raised when no translated result is available."""
+
 # ---------------------------------------------------------------------------
 # Bulletproof fallback map — guarantees flawless rendering for demo sentences
 # regardless of LLM Gateway availability. Keys are lowercased + stripped.
@@ -35,6 +39,9 @@ _FALLBACK_MAP: dict[str, str] = {
     "hi":                             "नमस्ते",
     "hello!":                         "नमस्ते",
     "hi!":                            "नमस्ते",
+    "good morning":                   "सुप्रभात।",
+    "i'm doing well, thank you.":     "मैं अच्छा हूँ, धन्यवाद।",
+    "i'm doing well, thank you":      "मैं अच्छा हूँ, धन्यवाद।",
     # Hindi → English
     "mera nam kusuma":               "My name is Kusuma.",
     "mera naam kusuma":              "My name is Kusuma.",
@@ -56,6 +63,8 @@ _FALLBACK_MAP: dict[str, str] = {
     "आप कैसे हैं":                   "How are you?",
     "आप कैसे हो?":                   "How are you?",
     "आप कैसे हो":                    "How are you?",
+    "समय क्या हुआ है?":               "What time is it?",
+    "समय क्या हुआ है":                "What time is it?",
     "आज मौसम कैसे है?":              "How is the weather today?",
     "आज मौसम कैसे है":               "How is the weather today?",
     "आज मौसम कैसा है?":              "How is the weather today?",
@@ -189,8 +198,7 @@ class TranslationService:
         if clean_text.lower() in _NOISE_WORDS:
             return "..."
 
-        # Avoid translating English into Hindi for the English bot, and avoid
-        # rewriting text when callers explicitly request the same language.
+        # Avoid rewriting text when callers explicitly request the same language.
         if source_code == target_code:
             return clean_text
 
@@ -210,12 +218,12 @@ class TranslationService:
             if source_code == "hi" or has_hindi:
                 direction = "hi_to_en"
             else:
-                return clean_text
+                raise TranslationError("Transcript language does not match requested Hindi → English translation.")
         elif target_code == "hi":
             if source_code == "en" or has_eng:
                 direction = "en_to_hi"
             else:
-                return clean_text
+                raise TranslationError("Transcript language does not match requested English → Hindi translation.")
         elif has_hindi and not has_eng:
             direction = "hi_to_en"
         elif has_eng and not has_hindi:
@@ -230,9 +238,8 @@ class TranslationService:
         if result:
             return result
 
-        # --- 4. Last resort: return original text ----------------------------
         logger.warning("All translation paths failed (direction=%s).", direction)
-        return clean_text
+        raise TranslationError(f"Translation unavailable for direction {direction}.")
 
 
 translation_service = TranslationService()

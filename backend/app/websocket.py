@@ -1,7 +1,9 @@
 import asyncio
 import json
 import logging
-import re
+import uuid
+import time
+from collections import deque
 from fastapi import WebSocket, WebSocketDisconnect
 from app.assemblyai_service import AssemblyAIService
 from app.translation_service import translation_service
@@ -36,6 +38,17 @@ class WebSocketHandler:
             }
         }
         self.is_session_active = False
+        self.translation_queue = asyncio.Queue()
+        self.translation_worker = None
+        self.seen_final_keys = set()
+        self.recent_finals = deque(maxlen=64)
+
+    def _callbacks_for_speaker(self, speaker):
+        async def partial(text):
+            await self.on_partial_transcript(text, speaker)
+        async def final(text, metadata=None):
+            await self.on_final_transcript(text, speaker, metadata or {})
+        return partial, final
 
     async def handle(self):
         await self.websocket.accept()
@@ -76,6 +89,7 @@ class WebSocketHandler:
                         speaker = data.get("speaker", "person_a")
                         if speaker in self.speaker_configs and speaker != self.active_speaker:
                             self.active_speaker = speaker
+                            self.seen_final_keys.clear()
                             cfg = self.speaker_configs[speaker]
                             logger.info(f"Switching active speaker to: {speaker} ({cfg['name']})")
                             
@@ -85,9 +99,10 @@ class WebSocketHandler:
                                 await self.assemblyai_service.disconnect()
                                 
                                 current_lang = cfg["source_lang"]
+                                partial_cb, final_cb = self._callbacks_for_speaker(speaker)
                                 success = await self.assemblyai_service.connect(
-                                    on_partial=self.on_partial_transcript,
-                                    on_final=self.on_final_transcript,
+                                    on_partial=partial_cb,
+                                    on_final=final_cb,
                                     on_status=self.on_assemblyai_status,
                                     language_code=current_lang
                                 )
@@ -120,15 +135,18 @@ class WebSocketHandler:
             return
 
         self.is_session_active = True
+        self.seen_final_keys.clear()
         
         cfg = self.speaker_configs[self.active_speaker]
+        self.translation_worker = asyncio.create_task(self._translation_worker())
+        partial_cb, final_cb = self._callbacks_for_speaker(self.active_speaker)
         current_lang = cfg["source_lang"]
         
         logger.info(f"Starting AssemblyAI session for language: {current_lang}...")
 
         success = await self.assemblyai_service.connect(
-            on_partial=self.on_partial_transcript,
-            on_final=self.on_final_transcript,
+            on_partial=partial_cb,
+            on_final=final_cb,
             on_status=self.on_assemblyai_status,
             language_code=current_lang
         )
@@ -142,15 +160,20 @@ class WebSocketHandler:
 
         self.is_session_active = False
         await self.assemblyai_service.disconnect()
+        if self.translation_worker:
+            await self.translation_queue.join()
+            self.translation_worker.cancel()
+            await asyncio.gather(self.translation_worker, return_exceptions=True)
+            self.translation_worker = None
         await self.send_status(
             connected=True,
             assemblyai_ready=False,
             message="Session stopped. AssemblyAI connection closed."
         )
 
-    async def on_partial_transcript(self, text: str):
+    async def on_partial_transcript(self, text: str, speaker=None):
         msg = PartialTranscript(
-            speaker=self.active_speaker,
+            speaker=speaker or self.active_speaker,
             text=text
         )
         try:
@@ -158,56 +181,58 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"Failed to send partial transcript to frontend: {e}")
 
-    async def on_final_transcript(self, text: str):
+    async def on_final_transcript(self, text: str, speaker=None, metadata=None):
         """
-        Routes the final transcript through the translation service. Devanagari
-        transcripts are Hindi; otherwise the selected speaker's language is used,
-        which also supports romanized Hindi from Person A.
+        Queues one immutable final turn using the speaker bound to this ASR stream.
         """
         clean_text = text.strip()
         if not clean_text:
             return
 
-        cfg = self.speaker_configs[self.active_speaker]
-
-        has_hindi_script = bool(re.search(r"[\u0900-\u097F]", clean_text))
-        if has_hindi_script:
-            source_lang, target_lang = "hi", "en"
-            source_name, target_name = "Hindi", "English"
+        speaker = speaker or self.active_speaker
+        cfg = self.speaker_configs[speaker]
+        # Deduplicate retried final events by provider turn order where available.
+        turn_order = (metadata or {}).get("turn_order")
+        event_key = f"{speaker}:{turn_order}" if turn_order is not None else None
+        if event_key and event_key in self.seen_final_keys:
+            return
+        if event_key:
+            self.seen_final_keys.add(event_key)
         else:
-            source_lang, target_lang = cfg["source_lang"], cfg["target_lang"]
-            source_name, target_name = cfg["source_name"], cfg["target_name"]
+            now = time.monotonic()
+            if any(prev_speaker == speaker and prev_text == clean_text and now - seen_at < 1.5 for prev_speaker, prev_text, seen_at in self.recent_finals):
+                return
+            self.recent_finals.append((speaker, clean_text, now))
+        turn_id = str(uuid.uuid4())
+        turn = {"id": turn_id, "speaker": speaker, "cfg": cfg, "text": clean_text}
+        logger.info("TURN_ID=%s speaker=%s source_language=%s source_text=%s target_language=%s translated_text= translation_status=pending", turn_id, speaker, cfg["source_name"], clean_text, cfg["target_name"])
+        if not self.translation_worker or self.translation_worker.done():
+            self.translation_worker = asyncio.create_task(self._translation_worker())
+        await self.translation_queue.put(turn)
 
-        # Call the translation service (with instant fallback map for common phrases).
-        try:
-            translation = await translation_service.translate(
-                text=clean_text,
-                source_lang=source_lang,
-                target_lang=target_lang,
-            )
-        except Exception as exc:
-            logger.error(f"translation_service.translate error: {exc}")
-            translation = clean_text
-
-        display_original = clean_text
-        display_translation = translation
-
-        insights = insights_service.extract_insights(display_original, display_translation)
-
-        final_msg = FinalMessage(
-            speaker=self.active_speaker,
-            speaker_name=cfg["name"],
-            source_language=source_name,
-            target_language=target_name,
-            original_text=display_original,
-            translation=display_translation,
-            insights=insights,
-        )
-
-        try:
-            await self.websocket.send_text(final_msg.model_dump_json())
-        except Exception as e:
-            logger.error(f"Failed to send final transcript to frontend: {e}")
+    async def _translation_worker(self):
+        while True:
+            turn = await self.translation_queue.get()
+            cfg = turn["cfg"]
+            translation = ""
+            status = "translated"
+            try:
+                translation = await translation_service.translate(turn["text"], cfg["source_lang"], cfg["target_lang"])
+                if not translation or translation == turn["text"]:
+                    raise ValueError("Translation returned no distinct translated text")
+            except Exception as exc:
+                status = "failed"
+                logger.error("TURN_ID=%s speaker=%s source_language=%s source_text=%s target_language=%s translated_text= translation_status=failed error=%s", turn["id"], turn["speaker"], cfg["source_name"], turn["text"], cfg["target_name"], exc)
+            else:
+                logger.info("TURN_ID=%s speaker=%s source_language=%s source_text=%s target_language=%s translated_text=%s translation_status=translated", turn["id"], turn["speaker"], cfg["source_name"], turn["text"], cfg["target_name"], translation)
+            insights = insights_service.extract_insights(turn["text"], translation) if translation else []
+            final_msg = FinalMessage(id=turn["id"], speaker=turn["speaker"], speaker_name=cfg["name"], source_language=cfg["source_name"], target_language=cfg["target_name"], original_text=turn["text"], translation=translation, translation_status=status, insights=insights)
+            try:
+                await self.websocket.send_text(final_msg.model_dump_json())
+            except Exception as exc:
+                logger.error("Failed to send final transcript TURN_ID=%s: %s", turn["id"], exc)
+            finally:
+                self.translation_queue.task_done()
 
 
     async def on_assemblyai_status(self, message: str, ready: bool):

@@ -11,6 +11,7 @@ export function useWebSocket() {
 
   const wsRef = useRef(null);
   const isConnectingRef = useRef(false);
+  const seenMessageIdsRef = useRef(new Set());
 
   const connect = useCallback(() => {
     // Prevent duplicate simultaneous connections
@@ -55,16 +56,19 @@ export function useWebSocket() {
           setPartialTranscript(data);
           if (data.speaker) setActiveSpeakerState(data.speaker);
         } else if (data.type === 'final') {
+          if (!data.id || seenMessageIdsRef.current.has(data.id)) return;
+          seenMessageIdsRef.current.add(data.id);
           setPartialTranscript(null);
           if (data.speaker) setActiveSpeakerState(data.speaker);
           const finalPayload = {
-            id: data.id || Date.now(),
+            id: data.id,
             speaker: data.speaker,
             speaker_name: data.speaker_name,
             source_language: data.source_language,
             target_language: data.target_language,
             original_text: data.original_text,
-            translation: data.translation || data.original_text,
+            translation: data.translation || '',
+            translation_status: data.translation_status || 'failed',
             insights: data.insights || [],
           };
           setMessages((prev) => [...prev, finalPayload]);
@@ -136,6 +140,7 @@ export function useWebSocket() {
   }, []);
 
   const clearConversation = useCallback(() => {
+    seenMessageIdsRef.current.clear();
     setMessages([]);
     setInsights([]);
     setPartialTranscript(null);

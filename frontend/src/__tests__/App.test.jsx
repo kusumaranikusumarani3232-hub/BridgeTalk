@@ -51,6 +51,7 @@ describe('BridgeTalk Frontend Component Unit Tests', () => {
         target_language: 'English',
         original_text: 'Namaste kal meeting hai',
         translation: 'Hello tomorrow is meeting',
+        translation_status: 'translated',
         timestamp: '10:00:00',
       },
     ];
@@ -85,6 +86,7 @@ describe('BridgeTalk Frontend Component Unit Tests', () => {
         target_language: 'English',
         original_text: 'Namaste, kya aap kal aa sakte hain?',
         translation: 'Hello, can you come tomorrow?',
+        translation_status: 'translated',
         timestamp: '10:00:00',
       },
     ];

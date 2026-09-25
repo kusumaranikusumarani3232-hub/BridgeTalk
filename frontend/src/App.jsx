@@ -45,7 +45,8 @@ export default function App() {
 
   const spokenIdsRef = React.useRef(new Set());
 
-  // Speak each new final message only once when speech is enabled
+  // Speak each translated turn once, including translations that update a
+  // previously delivered pending message.
   useEffect(() => {
     if (messages.length === 0) {
       return;
@@ -53,11 +54,19 @@ export default function App() {
 
     messages.forEach((message) => {
       if (!message?.id || spokenIdsRef.current.has(message.id)) return;
-      spokenIdsRef.current.add(message.id);
-      if (!speakEnabled || message.translation_status !== 'translated' || !message.translation) return;
+      const translation = String(message.translation ?? '').trim();
+      if (
+        !speakEnabled ||
+        message.translation_status !== 'translated' ||
+        !translation ||
+        translation === '...' ||
+        translation === '…'
+      ) return;
       const targetLanguage = String(message.target_language || '').toLowerCase();
-      const targetLangCode = targetLanguage.includes('hindi') || targetLanguage === 'hi' ? 'hi' : 'en';
-      speak(message.translation, targetLangCode);
+      const targetLangCode = targetLanguage.includes('hindi') || targetLanguage.startsWith('hi') ? 'hi' : 'en';
+      // Record only when the translated text is actually queued for speech.
+      spokenIdsRef.current.add(message.id);
+      speak(translation, targetLangCode);
     });
   }, [messages, speakEnabled, speak]);
 

@@ -8,7 +8,7 @@ logger = logging.getLogger("bridgetalk.translation")
 
 # ---------------------------------------------------------------------------
 # Bulletproof fallback map — guarantees flawless rendering for demo sentences
-# regardless of LeMUR availability.  Keys are lowercased + stripped.
+# regardless of LLM Gateway availability. Keys are lowercased + stripped.
 # ---------------------------------------------------------------------------
 _FALLBACK_MAP: dict[str, str] = {
     # English → Hindi
@@ -21,6 +21,8 @@ _FALLBACK_MAP: dict[str, str] = {
     "hello my name is kusma":         "नमस्ते, मेरा नाम कुसमा है।",
     "hello, my name is kusuma":       "नमस्ते, मेरा नाम कुसुमा है।",
     "hello, my name is kusuma.":      "नमस्ते, मेरा नाम कुसुमा है।",
+    "oh":                             "ओह।",
+    "oh.":                            "ओह।",
     "what is your name":              "आपका नाम क्या है?",
     "what is your name?":             "आपका नाम क्या है?",
     "whats your name":                "आपका नाम क्या है?",
@@ -52,13 +54,22 @@ _FALLBACK_MAP: dict[str, str] = {
     "नमस्ते":                        "Hello!",
     "आप कैसे हैं?":                  "How are you?",
     "आप कैसे हैं":                   "How are you?",
+    "आप कैसे हो?":                   "How are you?",
+    "आप कैसे हो":                    "How are you?",
+    "आज मौसम कैसे है?":              "How is the weather today?",
+    "आज मौसम कैसे है":               "How is the weather today?",
+    "आज मौसम कैसा है?":              "How is the weather today?",
+    "व्हाट्सएप नेम":                 "What's your name?",
+    "मैं आयद्रवाद में हूँ।":          "I'm in Hyderabad.",
+    "मैं आयद्रवाद में हूँ":           "I'm in Hyderabad.",
 }
 
 # Noise words that signal microphone artefacts — suppress them
 _NOISE_WORDS = {"see", "see.", "okay", "okay.", "um", "uh", "hmm"}
 
-# AssemblyAI LeMUR Task API endpoint
-_LEMUR_URL = "https://api.assemblyai.com/lemur/v3/generate/task"
+# AssemblyAI LLM Gateway endpoint (LeMUR was sunset on 2026-03-31).
+_LLM_GATEWAY_URL = "https://llm-gateway.assemblyai.com/v1/chat/completions"
+_LLM_MODEL = "qwen3.5-4b-32k-fast"
 
 
 def _clean(text: str) -> str:
@@ -90,15 +101,15 @@ def _fallback_lookup(text: str) -> str | None:
     return _FALLBACK_MAP.get(key_stripped)
 
 
-async def _call_lemur(text: str, direction: str) -> str | None:
+async def _call_llm_gateway(text: str, direction: str) -> str | None:
     """
-    Call AssemblyAI LeMUR Task API.
+    Call AssemblyAI's OpenAI-compatible LLM Gateway.
     direction: "en_to_hi" or "hi_to_en"
     Returns the translated string, or None on failure.
     """
     api_key = settings.ASSEMBLYAI_API_KEY.strip()
     if not api_key or api_key.startswith("your_"):
-        logger.warning("LeMUR: No valid ASSEMBLYAI_API_KEY configured.")
+        logger.warning("LLM Gateway: No valid ASSEMBLYAI_API_KEY configured.")
         return None
 
     if direction == "en_to_hi":
@@ -119,14 +130,16 @@ async def _call_lemur(text: str, direction: str) -> str | None:
         )
 
     payload = {
-        "prompt": prompt,
-        "final_model": "anthropic/claude-3-5-sonnet",  # LeMUR default high-quality model
+        "model": _LLM_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 512,
+        "temperature": 0,
     }
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
-                _LEMUR_URL,
+                _LLM_GATEWAY_URL,
                 headers={
                     "Authorization": api_key,
                     "Content-Type": "application/json",
@@ -135,26 +148,33 @@ async def _call_lemur(text: str, direction: str) -> str | None:
             )
             if resp.status_code == 200:
                 data = resp.json()
-                result = data.get("response", "").strip()
+                choices = data.get("choices") or []
+                result = (
+                    choices[0].get("message", {}).get("content", "").strip()
+                    if choices else ""
+                )
                 if result:
-                    logger.info(f"LeMUR ({direction}) success: {text!r} → {result!r}")
+                    logger.info(
+                        "LLM Gateway success: direction=%s model=%s request_id=%s",
+                        direction, _LLM_MODEL, data.get("request_id", "unknown"),
+                    )
                     return result
                 else:
-                    logger.warning("LeMUR returned empty response.")
+                    logger.warning("LLM Gateway returned an empty response.")
             else:
-                logger.error(f"LeMUR API error {resp.status_code}: {resp.text[:300]}")
+                logger.error("LLM Gateway API error %s: %s", resp.status_code, resp.text[:500])
     except httpx.TimeoutException:
-        logger.error("LeMUR request timed out.")
+        logger.error("LLM Gateway request timed out.")
     except Exception as exc:
-        logger.error(f"LeMUR call failed: {exc}")
+        logger.error("LLM Gateway call failed: %s", exc)
 
     return None
 
 
 class TranslationService:
     """
-    Translation service backed exclusively by AssemblyAI LeMUR Task API.
-    Falls back to the hardcoded demo-sentence map when LeMUR is unavailable.
+    Translation service backed by AssemblyAI's LLM Gateway.
+    Falls back to common phrases when the Gateway is unavailable.
     """
 
     async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
@@ -205,13 +225,13 @@ class TranslationService:
         else:
             direction = "en_to_hi" if source_lang == "en" else "hi_to_en"
 
-        # --- 3. LeMUR API call -----------------------------------------------
-        result = await _call_lemur(clean_text, direction)
+        # --- 3. LLM Gateway call ---------------------------------------------
+        result = await _call_llm_gateway(clean_text, direction)
         if result:
             return result
 
         # --- 4. Last resort: return original text ----------------------------
-        logger.warning(f"All translation paths failed for: {clean_text!r}")
+        logger.warning("All translation paths failed (direction=%s).", direction)
         return clean_text
 
 

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 from fastapi import WebSocket, WebSocketDisconnect
 from app.assemblyai_service import AssemblyAIService
 from app.translation_service import translation_service
@@ -159,9 +160,9 @@ class WebSocketHandler:
 
     async def on_final_transcript(self, text: str):
         """
-        Routes the final transcript through the LeMUR-backed translation_service.
-        Speaker configuration determines the source language. Both speakers' translated
-        output is English, and English speech is passed through unchanged.
+        Routes the final transcript through the translation service. Devanagari
+        transcripts are Hindi; otherwise the selected speaker's language is used,
+        which also supports romanized Hindi from Person A.
         """
         clean_text = text.strip()
         if not clean_text:
@@ -169,10 +170,15 @@ class WebSocketHandler:
 
         cfg = self.speaker_configs[self.active_speaker]
 
-        source_lang = cfg["source_lang"]
-        target_lang = cfg["target_lang"]
+        has_hindi_script = bool(re.search(r"[\u0900-\u097F]", clean_text))
+        if has_hindi_script:
+            source_lang, target_lang = "hi", "en"
+            source_name, target_name = "Hindi", "English"
+        else:
+            source_lang, target_lang = cfg["source_lang"], cfg["target_lang"]
+            source_name, target_name = cfg["source_name"], cfg["target_name"]
 
-        # Call LeMUR (with instant fallback map for demo sentences)
+        # Call the translation service (with instant fallback map for common phrases).
         try:
             translation = await translation_service.translate(
                 text=clean_text,
@@ -191,8 +197,8 @@ class WebSocketHandler:
         final_msg = FinalMessage(
             speaker=self.active_speaker,
             speaker_name=cfg["name"],
-            source_language=cfg["source_name"],
-            target_language=cfg["target_name"],
+            source_language=source_name,
+            target_language=target_name,
             original_text=display_original,
             translation=display_translation,
             insights=insights,

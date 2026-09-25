@@ -218,7 +218,7 @@ class WebSocketHandler:
             status = "translated"
             try:
                 translation = await translation_service.translate(turn["text"], cfg["source_lang"], cfg["target_lang"])
-                if not translation or translation == turn["text"]:
+                if not translation or translation.strip() in {"...", "…"} or translation == turn["text"]:
                     raise ValueError("Translation returned no distinct translated text")
             except Exception as exc:
                 status = "failed"

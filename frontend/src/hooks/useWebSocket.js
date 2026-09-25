@@ -1,5 +1,12 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 
+export function getWebSocketUrl(hostname = window.location.hostname, isDev = import.meta.env.DEV) {
+  const isLocalHost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+  return isDev || isLocalHost
+    ? 'ws://localhost:8000/ws/transcribe'
+    : 'wss://bridgetalk-olvd.onrender.com/ws/transcribe';
+}
+
 export function useWebSocket() {
   const [isConnected, setIsConnected] = useState(false);
   const [assemblyaiReady, setAssemblyaiReady] = useState(false);
@@ -21,7 +28,7 @@ export function useWebSocket() {
     }
 
     isConnectingRef.current = true;
-    const wsUrl = 'wss://bridgetalk-olvd.onrender.com/ws/transcribe';
+    const wsUrl = getWebSocketUrl();
     console.log('Connecting WebSocket to:', wsUrl);
 
     let ws;

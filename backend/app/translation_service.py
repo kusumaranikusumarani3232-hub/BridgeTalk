@@ -39,6 +39,10 @@ _FALLBACK_MAP: dict[str, str] = {
     "hi":                             "नमस्ते",
     "hello!":                         "नमस्ते",
     "hi!":                            "नमस्ते",
+    "okay":                           "ठीक है।",
+    "okay.":                          "ठीक है।",
+    "ok":                             "ठीक है।",
+    "ok.":                            "ठीक है।",
     "good morning":                   "सुप्रभात।",
     "i'm doing well, thank you.":     "मैं अच्छा हूँ, धन्यवाद।",
     "i'm doing well, thank you":      "मैं अच्छा हूँ, धन्यवाद।",
@@ -73,9 +77,6 @@ _FALLBACK_MAP: dict[str, str] = {
     "मैं आयद्रवाद में हूँ":           "I'm in Hyderabad.",
 }
 
-# Noise words that signal microphone artefacts — suppress them
-_NOISE_WORDS = {"see", "see.", "okay", "okay.", "um", "uh", "hmm"}
-
 # AssemblyAI LLM Gateway endpoint (LeMUR was sunset on 2026-03-31).
 _LLM_GATEWAY_URL = "https://llm-gateway.assemblyai.com/v1/chat/completions"
 _LLM_MODEL = "qwen3.5-4b-32k-fast"
@@ -96,21 +97,28 @@ def _has_latin(text: str) -> bool:
     return bool(re.search(r"[A-Za-z]", text))
 
 
-def _fallback_lookup(text: str) -> str | None:
+def _fallback_lookup(text: str, target_lang: str | None = None) -> str | None:
     """
     Fuzzy lookup in the hardcoded fallback map.
     Tries exact match first, then a cleaned/lowercased match.
     Returns None if no match found.
     """
     key = text.strip().lower()
-    if key in _FALLBACK_MAP:
-        return _FALLBACK_MAP[key]
+    if target_lang == "en" and key.rstrip("?.!,;:") in {"ok", "okay"}:
+        return "Okay."
+    result = _FALLBACK_MAP.get(key)
     # Try stripping trailing punctuation for a second attempt
-    key_stripped = key.rstrip("?.!,;:")
-    return _FALLBACK_MAP.get(key_stripped)
+    if result is None:
+        key_stripped = key.rstrip("?.!,;:")
+        result = _FALLBACK_MAP.get(key_stripped)
+    if result and target_lang == "en" and _has_devanagari(result):
+        return None
+    if result and target_lang == "hi" and not _has_devanagari(result):
+        return None
+    return result
 
 
-async def _call_llm_gateway(text: str, direction: str) -> str | None:
+async def _call_llm_gateway(text: str, direction: str, romanized_hindi: bool = False) -> str | None:
     """
     Call AssemblyAI's OpenAI-compatible LLM Gateway.
     direction: "en_to_hi" or "hi_to_en"
@@ -130,9 +138,14 @@ async def _call_llm_gateway(text: str, direction: str) -> str | None:
             f"English text: {text}"
         )
     else:  # hi_to_en
+        script_guidance = (
+            "The Hindi may be written in Devanagari or Latin transliteration. "
+            if romanized_hindi else "The Hindi text is written in Devanagari script. "
+        )
         prompt = (
             "You are a professional Hindi-to-English translator. "
-            "Translate the following Hindi text (written in Devanagari script) into fluent, natural English. "
+            f"Translate the following Hindi text. {script_guidance}"
+            "Return fluent, natural English. "
             "Return ONLY the translated English text with no explanation and no extra punctuation "
             "beyond what naturally belongs in the sentence.\n\n"
             f"Hindi text: {text}"
@@ -145,37 +158,58 @@ async def _call_llm_gateway(text: str, direction: str) -> str | None:
         "temperature": 0,
     }
 
-    try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                _LLM_GATEWAY_URL,
-                headers={
-                    "Authorization": api_key,
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
-                choices = data.get("choices") or []
-                result = (
-                    choices[0].get("message", {}).get("content", "").strip()
-                    if choices else ""
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(
+                    _LLM_GATEWAY_URL,
+                    headers={
+                        "Authorization": api_key,
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
                 )
-                if result:
-                    logger.info(
-                        "LLM Gateway success: direction=%s model=%s request_id=%s",
-                        direction, _LLM_MODEL, data.get("request_id", "unknown"),
-                    )
-                    return result
-                else:
-                    logger.warning("LLM Gateway returned an empty response.")
-            else:
-                logger.error("LLM Gateway API error %s: %s", resp.status_code, resp.text[:500])
-    except httpx.TimeoutException:
-        logger.error("LLM Gateway request timed out.")
-    except Exception as exc:
-        logger.error("LLM Gateway call failed: %s", exc)
+        except httpx.TimeoutException:
+            logger.warning("LLM Gateway request timed out (attempt %s/3).", attempt + 1)
+            if attempt < 2:
+                await asyncio.sleep(0.8 * (attempt + 1))
+                continue
+            break
+        except httpx.RequestError as exc:
+            logger.warning("LLM Gateway network request failed (%s).", type(exc).__name__)
+            if attempt < 2:
+                await asyncio.sleep(0.8 * (attempt + 1))
+                continue
+            break
+        except Exception as exc:
+            logger.error("LLM Gateway call failed (%s).", type(exc).__name__)
+            break
+
+        if resp.status_code == 200:
+            data = resp.json()
+            choices = data.get("choices") or []
+            result = (
+                choices[0].get("message", {}).get("content", "").strip()
+                if choices else ""
+            )
+            if result:
+                logger.info(
+                    "LLM Gateway success: direction=%s model=%s request_id=%s",
+                    direction, _LLM_MODEL, data.get("request_id", "unknown"),
+                )
+                return result
+            logger.warning("LLM Gateway returned an empty response.")
+        else:
+            logger.error("LLM Gateway API error %s.", resp.status_code)
+            if resp.status_code != 429 and resp.status_code < 500:
+                break
+        if attempt < 2:
+            retry_after = resp.headers.get("Retry-After")
+            try:
+                delay = float(retry_after) if retry_after else 0.8 * (attempt + 1)
+            except ValueError:
+                delay = 0.8 * (attempt + 1)
+            await asyncio.sleep(min(max(delay, 0.4), 10.0))
 
     return None
 
@@ -194,16 +228,12 @@ class TranslationService:
         source_code = source_lang.lower().split("-")[0]
         target_code = target_lang.lower().split("-")[0]
 
-        # Suppress microphone noise / filler words
-        if clean_text.lower() in _NOISE_WORDS:
-            return "..."
-
         # Avoid rewriting text when callers explicitly request the same language.
         if source_code == target_code:
             return clean_text
 
         # --- 1. Hardcoded fallback map (instant, zero-latency) ---------------
-        fallback = _fallback_lookup(clean_text)
+        fallback = _fallback_lookup(clean_text, target_code)
         if fallback:
             logger.info(f"Fallback map hit: {clean_text!r} → {fallback!r}")
             return fallback
@@ -234,7 +264,11 @@ class TranslationService:
             direction = "en_to_hi" if source_lang == "en" else "hi_to_en"
 
         # --- 3. LLM Gateway call ---------------------------------------------
-        result = await _call_llm_gateway(clean_text, direction)
+        result = await _call_llm_gateway(
+            clean_text,
+            direction,
+            romanized_hindi=(source_code == "hi" and not has_hindi),
+        )
         if result:
             return result
 

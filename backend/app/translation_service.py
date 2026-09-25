@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import re
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 import httpx
 from app.config import settings
 
@@ -81,8 +83,29 @@ _FALLBACK_MAP: dict[str, str] = {
 _LLM_GATEWAY_URL = "https://llm-gateway.assemblyai.com/v1/chat/completions"
 _LLM_MODEL = "qwen3.5-4b-32k-fast"
 _MAX_GATEWAY_ATTEMPTS = 3
-_RATE_LIMIT_BACKOFF_SECONDS = (0.25, 0.5)
-_MAX_RETRY_AFTER_SECONDS = 1.0
+_MAX_RETRY_AFTER_SECONDS = 5.0
+_MIN_GATEWAY_REQUEST_INTERVAL = 0.25
+_gateway_cooldown_until = 0.0
+_gateway_next_request_at = 0.0
+_gateway_lock = asyncio.Lock()
+
+
+def _rate_limit_cooldown(resp) -> float:
+    """Bound server-provided cooldowns; fall back to a short local cooldown."""
+    retry_after = resp.headers.get("Retry-After")
+    try:
+        if not retry_after:
+            return 1.0
+        try:
+            seconds = float(retry_after)
+        except ValueError:
+            retry_at = parsedate_to_datetime(retry_after)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            seconds = (retry_at - datetime.now(timezone.utc)).total_seconds()
+        return min(max(seconds, 0.25), _MAX_RETRY_AFTER_SECONDS)
+    except (TypeError, ValueError):
+        return 1.0
 
 
 def _clean(text: str) -> str:
@@ -161,68 +184,67 @@ async def _call_llm_gateway(text: str, direction: str, romanized_hindi: bool = F
         "temperature": 0,
     }
 
-    for attempt in range(_MAX_GATEWAY_ATTEMPTS):
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    _LLM_GATEWAY_URL,
-                    headers={
-                        "Authorization": api_key,
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
-        except httpx.TimeoutException:
-            logger.warning("LLM Gateway request timed out (attempt %s/3).", attempt + 1)
-            if attempt < 2:
-                await asyncio.sleep(0.8 * (attempt + 1))
-                continue
-            break
-        except httpx.RequestError as exc:
-            logger.warning("LLM Gateway network request failed (%s).", type(exc).__name__)
-            if attempt < 2:
-                await asyncio.sleep(0.8 * (attempt + 1))
-                continue
-            break
-        except Exception as exc:
-            logger.error("LLM Gateway call failed (%s).", type(exc).__name__)
-            break
+    global _gateway_cooldown_until, _gateway_next_request_at
+    now = asyncio.get_running_loop().time()
+    if now < _gateway_cooldown_until:
+        logger.info("LLM Gateway cooldown active; skipping request.")
+        return None
 
-        if resp.status_code == 200:
-            data = resp.json()
-            choices = data.get("choices") or []
-            result = (
-                choices[0].get("message", {}).get("content", "").strip()
-                if choices else ""
-            )
-            if result:
-                logger.info(
-                    "LLM Gateway success: direction=%s model=%s request_id=%s",
-                    direction, _LLM_MODEL, data.get("request_id", "unknown"),
-                )
-                return result
-            logger.warning("LLM Gateway returned an empty response.")
-        else:
-            logger.error("LLM Gateway API error %s.", resp.status_code)
-            if resp.status_code == 429:
-                if attempt >= _MAX_GATEWAY_ATTEMPTS - 1:
-                    break
-                retry_after = resp.headers.get("Retry-After")
-                try:
-                    delay = min(max(float(retry_after), 0.0), _MAX_RETRY_AFTER_SECONDS) if retry_after else _RATE_LIMIT_BACKOFF_SECONDS[attempt]
-                except (TypeError, ValueError):
-                    delay = _RATE_LIMIT_BACKOFF_SECONDS[attempt]
-                await asyncio.sleep(delay)
-                continue
-            if resp.status_code != 429 and resp.status_code < 500:
-                break
-        if attempt < 2:
-            retry_after = resp.headers.get("Retry-After")
+    async with _gateway_lock:
+        now = asyncio.get_running_loop().time()
+        if now < _gateway_cooldown_until:
+            logger.info("LLM Gateway cooldown active; skipping queued request.")
+            return None
+        for attempt in range(_MAX_GATEWAY_ATTEMPTS):
+            spacing = _gateway_next_request_at - asyncio.get_running_loop().time()
+            if spacing > 0:
+                await asyncio.sleep(spacing)
             try:
-                delay = float(retry_after) if retry_after else 0.8 * (attempt + 1)
-            except ValueError:
-                delay = 0.8 * (attempt + 1)
-            await asyncio.sleep(min(max(delay, 0.4), 10.0))
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(
+                        _LLM_GATEWAY_URL,
+                        headers={"Authorization": api_key, "Content-Type": "application/json"},
+                        json=payload,
+                    )
+            except (httpx.TimeoutException, httpx.RequestError) as exc:
+                logger.warning("LLM Gateway request failed (%s).", type(exc).__name__)
+                if attempt < _MAX_GATEWAY_ATTEMPTS - 1:
+                    await asyncio.sleep(0.8 * (attempt + 1))
+                    continue
+                return None
+            except Exception as exc:
+                logger.error("LLM Gateway call failed (%s).", type(exc).__name__)
+                return None
+
+            completed_at = asyncio.get_running_loop().time()
+            _gateway_next_request_at = completed_at + _MIN_GATEWAY_REQUEST_INTERVAL
+            if resp.status_code == 429:
+                cooldown = _rate_limit_cooldown(resp)
+                _gateway_cooldown_until = completed_at + cooldown
+                logger.warning("LLM Gateway rate limited; cooldown %.2fs.", cooldown)
+                return None
+            if resp.status_code == 200:
+                _gateway_cooldown_until = 0.0
+                try:
+                    data = resp.json()
+                    choices = data.get("choices") or []
+                    result = choices[0].get("message", {}).get("content", "").strip() if choices else ""
+                except Exception as exc:
+                    logger.warning("LLM Gateway returned invalid response (%s).", type(exc).__name__)
+                    return None
+                if result:
+                    logger.info(
+                        "LLM Gateway success: direction=%s model=%s request_id=%s",
+                        direction, _LLM_MODEL, data.get("request_id", "unknown"),
+                    )
+                    return result
+                logger.warning("LLM Gateway returned an empty response.")
+                return None
+
+            logger.error("LLM Gateway API error %s.", resp.status_code)
+            if resp.status_code < 500 or attempt == _MAX_GATEWAY_ATTEMPTS - 1:
+                return None
+            await asyncio.sleep(0.8 * (attempt + 1))
 
     return None
 

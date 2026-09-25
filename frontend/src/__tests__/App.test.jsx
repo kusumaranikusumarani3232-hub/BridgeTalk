@@ -60,6 +60,21 @@ describe('BridgeTalk Frontend Component Unit Tests', () => {
     expect(screen.getByText('"Hello tomorrow is meeting"')).toBeDefined();
   });
 
+  it('shows finalized transcript text while translation is pending', () => {
+    render(<ConversationList messages={[{
+      id: 'pending-1',
+      speaker: 'person_b',
+      speaker_name: 'Person B',
+      source_language: 'English',
+      target_language: 'Hindi',
+      original_text: 'What is this?',
+      translation: '',
+      translation_status: 'pending',
+    }]} />);
+    expect(screen.getByText('"What is this?"')).toBeDefined();
+    expect(screen.getByText('Translating…')).toBeDefined();
+  });
+
   it('renders InsightsPanel with items', () => {
     const sampleInsights = [
       { category: 'date', label: 'Date', value: 'Tomorrow', icon: '📅' },

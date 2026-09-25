@@ -2,9 +2,8 @@ import asyncio
 import json
 import logging
 import uuid
-import time
-from collections import deque
 from fastapi import WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 from app.assemblyai_service import AssemblyAIService
 from app.translation_service import translation_service
 from app.insights_service import insights_service
@@ -38,12 +37,19 @@ class WebSocketHandler:
             }
         }
         self.is_session_active = False
+        self.client_connected = True
         # One turn can be translating while up to sixteen finalized turns wait.
         # Overflow fails promptly instead of building latency behind the LLM.
         self.translation_queue = asyncio.Queue(maxsize=16)
         self.translation_worker = None
         self.seen_final_keys = set()
-        self.recent_finals = deque(maxlen=64)
+
+    def _socket_open(self):
+        if not self.client_connected:
+            return False
+        client_state = getattr(self.websocket, "client_state", WebSocketState.CONNECTED)
+        app_state = getattr(self.websocket, "application_state", WebSocketState.CONNECTED)
+        return client_state == WebSocketState.CONNECTED and app_state == WebSocketState.CONNECTED
 
     def _callbacks_for_speaker(self, speaker):
         async def partial(text):
@@ -54,6 +60,7 @@ class WebSocketHandler:
 
     async def handle(self):
         await self.websocket.accept()
+        self.client_connected = True
         logger.info("Client WebSocket connected.")
         
         try:
@@ -129,6 +136,7 @@ class WebSocketHandler:
         except Exception as e:
             logger.error(f"WebSocket handler error: {e}")
         finally:
+            self.client_connected = False
             await self.stop_session()
 
     async def start_session(self):
@@ -157,21 +165,24 @@ class WebSocketHandler:
             self.is_session_active = False
 
     async def stop_session(self):
-        if not self.is_session_active:
-            return
-
         self.is_session_active = False
         await self.assemblyai_service.disconnect()
         if self.translation_worker:
-            await self.translation_queue.join()
             self.translation_worker.cancel()
             await asyncio.gather(self.translation_worker, return_exceptions=True)
             self.translation_worker = None
-        await self.send_status(
-            connected=True,
-            assemblyai_ready=False,
-            message="Session stopped. AssemblyAI connection closed."
-        )
+        while not self.translation_queue.empty():
+            try:
+                self.translation_queue.get_nowait()
+                self.translation_queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+        if self._socket_open():
+            await self.send_status(
+                connected=True,
+                assemblyai_ready=False,
+                message="Session stopped. AssemblyAI connection closed."
+            )
 
     async def on_partial_transcript(self, text: str, speaker=None):
         msg = PartialTranscript(
@@ -179,7 +190,8 @@ class WebSocketHandler:
             text=text
         )
         try:
-            await self.websocket.send_text(msg.model_dump_json())
+            if self._socket_open():
+                await self.websocket.send_text(msg.model_dump_json())
         except Exception as e:
             logger.error(f"Failed to send partial transcript to frontend: {e}")
 
@@ -194,41 +206,45 @@ class WebSocketHandler:
         speaker = speaker or self.active_speaker
         cfg = self.speaker_configs[speaker]
         # Deduplicate retried final events by provider turn order where available.
-        turn_order = (metadata or {}).get("turn_order")
-        event_key = f"{speaker}:{turn_order}" if turn_order is not None else None
+        metadata = metadata or {}
+        turn_identity = metadata.get("turn_id") or metadata.get("id") or metadata.get("turn_order")
+        event_key = f"{speaker}:{turn_identity}" if turn_identity is not None else None
         if event_key and event_key in self.seen_final_keys:
             return
         if event_key:
             self.seen_final_keys.add(event_key)
-        else:
-            now = time.monotonic()
-            if any(prev_speaker == speaker and prev_text == clean_text and now - seen_at < 1.5 for prev_speaker, prev_text, seen_at in self.recent_finals):
-                return
-            self.recent_finals.append((speaker, clean_text, now))
         turn_id = str(uuid.uuid4())
         turn = {"id": turn_id, "speaker": speaker, "cfg": cfg, "text": clean_text}
+        if not self._socket_open():
+            return
         logger.info("TURN_ID=%s speaker=%s source_language=%s source_text=%s target_language=%s translated_text= translation_status=pending", turn_id, speaker, cfg["source_name"], clean_text, cfg["target_name"])
+        await self._send_turn_result(turn, "pending")
         if not self.translation_worker or self.translation_worker.done():
             self.translation_worker = asyncio.create_task(self._translation_worker())
         try:
             self.translation_queue.put_nowait(turn)
         except asyncio.QueueFull:
-            logger.warning("TURN_ID=%s translation queue full; failing turn promptly", turn_id)
-            failed_msg = FinalMessage(
-                id=turn_id,
-                speaker=speaker,
-                speaker_name=cfg["name"],
-                source_language=cfg["source_name"],
-                target_language=cfg["target_name"],
-                original_text=clean_text,
-                translation="",
-                translation_status="failed",
-                insights=[],
-            )
-            try:
-                await self.websocket.send_text(failed_msg.model_dump_json())
-            except Exception as exc:
-                logger.error("Failed to send overflow final TURN_ID=%s: %s", turn_id, exc)
+            # Drop the oldest pending turn to keep the live conversation fresh.
+            stale_turn = self.translation_queue.get_nowait()
+            self.translation_queue.task_done()
+            await self._send_turn_result(stale_turn, "failed")
+            self.translation_queue.put_nowait(turn)
+
+    async def _send_turn_result(self, turn, status, translation=""):
+        if not self._socket_open():
+            return
+        cfg = turn["cfg"]
+        final_msg = FinalMessage(
+            id=turn["id"], speaker=turn["speaker"], speaker_name=cfg["name"],
+            source_language=cfg["source_name"], target_language=cfg["target_name"],
+            original_text=turn["text"], translation=translation,
+            translation_status=status,
+            insights=insights_service.extract_insights(turn["text"], translation) if translation else [],
+        )
+        try:
+            await self.websocket.send_text(final_msg.model_dump_json())
+        except Exception as exc:
+            logger.error("Failed to send final TURN_ID=%s: %s", turn["id"], exc)
 
     async def _translation_worker(self):
         while True:
@@ -237,20 +253,16 @@ class WebSocketHandler:
             translation = ""
             status = "translated"
             try:
-                translation = await translation_service.translate(turn["text"], cfg["source_lang"], cfg["target_lang"])
-                if not translation or translation.strip() in {"...", "…"} or translation == turn["text"]:
-                    raise ValueError("Translation returned no distinct translated text")
-            except Exception as exc:
-                status = "failed"
-                logger.error("TURN_ID=%s speaker=%s source_language=%s source_text=%s target_language=%s translated_text= translation_status=failed error=%s", turn["id"], turn["speaker"], cfg["source_name"], turn["text"], cfg["target_name"], exc)
-            else:
-                logger.info("TURN_ID=%s speaker=%s source_language=%s source_text=%s target_language=%s translated_text=%s translation_status=translated", turn["id"], turn["speaker"], cfg["source_name"], turn["text"], cfg["target_name"], translation)
-            insights = insights_service.extract_insights(turn["text"], translation) if translation else []
-            final_msg = FinalMessage(id=turn["id"], speaker=turn["speaker"], speaker_name=cfg["name"], source_language=cfg["source_name"], target_language=cfg["target_name"], original_text=turn["text"], translation=translation, translation_status=status, insights=insights)
-            try:
-                await self.websocket.send_text(final_msg.model_dump_json())
-            except Exception as exc:
-                logger.error("Failed to send final transcript TURN_ID=%s: %s", turn["id"], exc)
+                try:
+                    if self._socket_open():
+                        translation = await translation_service.translate(turn["text"], cfg["source_lang"], cfg["target_lang"])
+                        if not translation or translation.strip() in {"...", "…"} or translation == turn["text"]:
+                            raise ValueError("Translation returned no distinct translated text")
+                        logger.info("TURN_ID=%s speaker=%s source_language=%s source_text=%s target_language=%s translated_text=%s translation_status=translated", turn["id"], turn["speaker"], cfg["source_name"], turn["text"], cfg["target_name"], translation)
+                except Exception as exc:
+                    status = "failed"
+                    logger.error("TURN_ID=%s speaker=%s source_language=%s source_text=%s target_language=%s translated_text= translation_status=failed error=%s", turn["id"], turn["speaker"], cfg["source_name"], turn["text"], cfg["target_name"], exc)
+                await self._send_turn_result(turn, status, translation)
             finally:
                 self.translation_queue.task_done()
 
@@ -270,7 +282,8 @@ class WebSocketHandler:
             message=message
         )
         try:
-            await self.websocket.send_text(status.model_dump_json())
+            if self._socket_open():
+                await self.websocket.send_text(status.model_dump_json())
         except Exception as e:
             logger.error(f"Failed to send status update: {e}")
 

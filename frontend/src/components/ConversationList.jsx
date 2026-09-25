@@ -68,7 +68,11 @@ export function ConversationList({ messages, onSpeakText }) {
                       {msg.target_language} Translation:
                     </div>
                     <div className="msg-translation-text">
-                      {msg.translation_status === 'translated' ? `"${msg.translation}"` : 'Translation failed. Please try this turn again.'}
+                      {msg.translation_status === 'translated'
+                        ? `"${msg.translation}"`
+                        : msg.translation_status === 'pending'
+                          ? 'Translating…'
+                          : 'Translation failed. Please try this turn again.'}
                     </div>
                   </div>
                 </div>

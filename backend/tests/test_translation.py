@@ -1,6 +1,14 @@
+import asyncio
 import pytest
 from app import translation_service as translation_module
 from app.translation_service import translation_service
+
+
+@pytest.fixture(autouse=True)
+def reset_gateway_state():
+    translation_module._gateway_cooldown_until = 0
+    translation_module._gateway_next_request_at = 0
+
 
 @pytest.mark.asyncio
 async def test_same_language_translation():
@@ -68,9 +76,8 @@ async def test_translation_gateway_retries_transient_server_failure(monkeypatch)
 
 
 @pytest.mark.asyncio
-async def test_rate_limit_retries_are_bounded_and_fast(monkeypatch):
+async def test_first_rate_limit_opens_cooldown_and_skips_new_gateway_calls(monkeypatch):
     calls = []
-    waits = []
 
     class Response:
         status_code = 429
@@ -84,23 +91,26 @@ async def test_rate_limit_retries_are_bounded_and_fast(monkeypatch):
             calls.append(1)
             return Response()
 
-    async def record_wait(delay): waits.append(delay)
+    async def record_wait(delay): pass
     monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
     monkeypatch.setattr(translation_module.asyncio, "sleep", record_wait)
     monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
 
+    loop = asyncio.get_running_loop()
+    translation_module._gateway_cooldown_until = 0
+    translation_module._gateway_next_request_at = 0
     result = await translation_module._call_llm_gateway("A fresh sentence", "en_to_hi")
+    skipped = await translation_module._call_llm_gateway("Another sentence", "en_to_hi")
 
     assert result is None
-    assert len(calls) == translation_module._MAX_GATEWAY_ATTEMPTS
-    assert len(waits) == translation_module._MAX_GATEWAY_ATTEMPTS - 1
-    assert sum(waits) <= 1.5
+    assert skipped is None
+    assert len(calls) == 1
+    assert translation_module._gateway_cooldown_until > loop.time()
 
 
 @pytest.mark.asyncio
 async def test_retry_after_is_capped(monkeypatch):
     calls = []
-    waits = []
 
     class Response:
         status_code = 429
@@ -114,14 +124,46 @@ async def test_retry_after_is_capped(monkeypatch):
             calls.append(1)
             return Response()
 
-    async def record_wait(delay): waits.append(delay)
     monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
-    monkeypatch.setattr(translation_module.asyncio, "sleep", record_wait)
     monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
+    translation_module._gateway_cooldown_until = 0
+    translation_module._gateway_next_request_at = 0
 
     assert await translation_module._call_llm_gateway("A fresh sentence", "en_to_hi") is None
-    assert waits == [translation_module._MAX_RETRY_AFTER_SECONDS] * 2
-    assert len(calls) == translation_module._MAX_GATEWAY_ATTEMPTS
+    assert translation_module._gateway_cooldown_until - asyncio.get_running_loop().time() <= translation_module._MAX_RETRY_AFTER_SECONDS
+    assert translation_module._gateway_cooldown_until - asyncio.get_running_loop().time() >= translation_module._MAX_RETRY_AFTER_SECONDS - 0.1
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_successful_200_resets_cooldown(monkeypatch):
+    calls = []
+    responses = [
+        type("Response", (), {"status_code": 429, "headers": {"Retry-After": "0.25"}, "json": lambda self: {}})(),
+        type("Response", (), {"status_code": 200, "headers": {}, "json": lambda self: {"choices": [{"message": {"content": "नमस्ते"}}]}})(),
+    ]
+
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def post(self, *args, **kwargs):
+            calls.append(1)
+            return responses.pop(0)
+
+    async def no_wait(_): return None
+    monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(translation_module.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
+    translation_module._gateway_cooldown_until = 0
+    translation_module._gateway_next_request_at = 0
+
+    assert await translation_module._call_llm_gateway("Hello there", "en_to_hi") is None
+    assert await translation_module._call_llm_gateway("Hello there", "en_to_hi") is None
+    translation_module._gateway_cooldown_until = 0
+    assert await translation_module._call_llm_gateway("Hello there", "en_to_hi") == "नमस्ते"
+    assert translation_module._gateway_cooldown_until == 0
+    assert len(calls) == 2
 
 
 @pytest.mark.asyncio
@@ -140,4 +182,37 @@ async def test_gateway_http_200_translation_unchanged(monkeypatch):
 
     monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
     monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
+    translation_module._gateway_cooldown_until = 0
+    translation_module._gateway_next_request_at = 0
     assert await translation_service.translate("This is a test", "en", "hi") == "यह एक परीक्षण है।"
+
+
+@pytest.mark.asyncio
+async def test_gateway_requests_remain_spaced_after_cooldown(monkeypatch):
+    request_times = []
+    loop = asyncio.get_running_loop()
+
+    class Response:
+        status_code = 200
+        headers = {}
+        def json(self):
+            return {"choices": [{"message": {"content": "नमस्ते"}}]}
+
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def post(self, *args, **kwargs):
+            request_times.append(asyncio.get_running_loop().time())
+            return Response()
+
+    monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
+    translation_module._gateway_cooldown_until = loop.time() + 1
+    translation_module._gateway_next_request_at = 0
+
+    assert await translation_module._call_llm_gateway("during cooldown", "en_to_hi") is None
+    translation_module._gateway_cooldown_until = 0
+    assert await translation_module._call_llm_gateway("first", "en_to_hi") == "नमस्ते"
+    assert await translation_module._call_llm_gateway("second", "en_to_hi") == "नमस्ते"
+    assert request_times[1] - request_times[0] >= translation_module._MIN_GATEWAY_REQUEST_INTERVAL * 0.8

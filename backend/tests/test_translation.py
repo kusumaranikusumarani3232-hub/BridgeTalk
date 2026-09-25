@@ -65,3 +65,79 @@ async def test_translation_gateway_retries_transient_server_failure(monkeypatch)
 
     assert result == "सुप्रभात।"
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_retries_are_bounded_and_fast(monkeypatch):
+    calls = []
+    waits = []
+
+    class Response:
+        status_code = 429
+        headers = {}
+
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def post(self, *args, **kwargs):
+            calls.append(1)
+            return Response()
+
+    async def record_wait(delay): waits.append(delay)
+    monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(translation_module.asyncio, "sleep", record_wait)
+    monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
+
+    result = await translation_module._call_llm_gateway("A fresh sentence", "en_to_hi")
+
+    assert result is None
+    assert len(calls) == translation_module._MAX_GATEWAY_ATTEMPTS
+    assert len(waits) == translation_module._MAX_GATEWAY_ATTEMPTS - 1
+    assert sum(waits) <= 1.5
+
+
+@pytest.mark.asyncio
+async def test_retry_after_is_capped(monkeypatch):
+    calls = []
+    waits = []
+
+    class Response:
+        status_code = 429
+        headers = {"Retry-After": "30"}
+
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def post(self, *args, **kwargs):
+            calls.append(1)
+            return Response()
+
+    async def record_wait(delay): waits.append(delay)
+    monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(translation_module.asyncio, "sleep", record_wait)
+    monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
+
+    assert await translation_module._call_llm_gateway("A fresh sentence", "en_to_hi") is None
+    assert waits == [translation_module._MAX_RETRY_AFTER_SECONDS] * 2
+    assert len(calls) == translation_module._MAX_GATEWAY_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_gateway_http_200_translation_unchanged(monkeypatch):
+    class Response:
+        status_code = 200
+        headers = {}
+        def json(self):
+            return {"choices": [{"message": {"content": "यह एक परीक्षण है।"}}]}
+
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def post(self, *args, **kwargs): return Response()
+
+    monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
+    assert await translation_service.translate("This is a test", "en", "hi") == "यह एक परीक्षण है।"

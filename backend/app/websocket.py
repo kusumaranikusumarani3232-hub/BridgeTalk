@@ -38,7 +38,9 @@ class WebSocketHandler:
             }
         }
         self.is_session_active = False
-        self.translation_queue = asyncio.Queue()
+        # One turn can be translating while up to sixteen finalized turns wait.
+        # Overflow fails promptly instead of building latency behind the LLM.
+        self.translation_queue = asyncio.Queue(maxsize=16)
         self.translation_worker = None
         self.seen_final_keys = set()
         self.recent_finals = deque(maxlen=64)
@@ -208,7 +210,25 @@ class WebSocketHandler:
         logger.info("TURN_ID=%s speaker=%s source_language=%s source_text=%s target_language=%s translated_text= translation_status=pending", turn_id, speaker, cfg["source_name"], clean_text, cfg["target_name"])
         if not self.translation_worker or self.translation_worker.done():
             self.translation_worker = asyncio.create_task(self._translation_worker())
-        await self.translation_queue.put(turn)
+        try:
+            self.translation_queue.put_nowait(turn)
+        except asyncio.QueueFull:
+            logger.warning("TURN_ID=%s translation queue full; failing turn promptly", turn_id)
+            failed_msg = FinalMessage(
+                id=turn_id,
+                speaker=speaker,
+                speaker_name=cfg["name"],
+                source_language=cfg["source_name"],
+                target_language=cfg["target_name"],
+                original_text=clean_text,
+                translation="",
+                translation_status="failed",
+                insights=[],
+            )
+            try:
+                await self.websocket.send_text(failed_msg.model_dump_json())
+            except Exception as exc:
+                logger.error("Failed to send overflow final TURN_ID=%s: %s", turn_id, exc)
 
     async def _translation_worker(self):
         while True:

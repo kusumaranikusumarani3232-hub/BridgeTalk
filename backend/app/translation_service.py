@@ -80,6 +80,9 @@ _FALLBACK_MAP: dict[str, str] = {
 # AssemblyAI LLM Gateway endpoint (LeMUR was sunset on 2026-03-31).
 _LLM_GATEWAY_URL = "https://llm-gateway.assemblyai.com/v1/chat/completions"
 _LLM_MODEL = "qwen3.5-4b-32k-fast"
+_MAX_GATEWAY_ATTEMPTS = 3
+_RATE_LIMIT_BACKOFF_SECONDS = (0.25, 0.5)
+_MAX_RETRY_AFTER_SECONDS = 1.0
 
 
 def _clean(text: str) -> str:
@@ -158,7 +161,7 @@ async def _call_llm_gateway(text: str, direction: str, romanized_hindi: bool = F
         "temperature": 0,
     }
 
-    for attempt in range(3):
+    for attempt in range(_MAX_GATEWAY_ATTEMPTS):
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
@@ -201,6 +204,16 @@ async def _call_llm_gateway(text: str, direction: str, romanized_hindi: bool = F
             logger.warning("LLM Gateway returned an empty response.")
         else:
             logger.error("LLM Gateway API error %s.", resp.status_code)
+            if resp.status_code == 429:
+                if attempt >= _MAX_GATEWAY_ATTEMPTS - 1:
+                    break
+                retry_after = resp.headers.get("Retry-After")
+                try:
+                    delay = min(max(float(retry_after), 0.0), _MAX_RETRY_AFTER_SECONDS) if retry_after else _RATE_LIMIT_BACKOFF_SECONDS[attempt]
+                except (TypeError, ValueError):
+                    delay = _RATE_LIMIT_BACKOFF_SECONDS[attempt]
+                await asyncio.sleep(delay)
+                continue
             if resp.status_code != 429 and resp.status_code < 500:
                 break
         if attempt < 2:

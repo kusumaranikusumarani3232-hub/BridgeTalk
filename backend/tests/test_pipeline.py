@@ -67,3 +67,40 @@ async def test_speaker_switch_sequence_and_translation_failure(monkeypatch):
     assert failed["translation"] != failed["original_text"]
     handler.translation_worker.cancel()
     await asyncio.gather(handler.translation_worker, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_duplicate_final_is_not_translated_and_queue_is_bounded(monkeypatch):
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    translated = []
+    active = 0
+    max_active = 0
+
+    async def translate(text, source_lang, target_lang):
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        translated.append(text)
+        entered.set()
+        await release.wait()
+        active -= 1
+        return f"{target_lang}:{text}"
+
+    monkeypatch.setattr(websocket_module.translation_service, "translate", translate)
+    handler = WebSocketHandler(FakeWebSocket())
+    await handler.on_final_transcript("first", "person_b", {"turn_order": 1})
+    await entered.wait()
+    for order in range(2, 18):
+        await handler.on_final_transcript(f"turn-{order}", "person_b", {"turn_order": order})
+    await handler.on_final_transcript("overflow", "person_b", {"turn_order": 18})
+    await handler.on_final_transcript("first", "person_b", {"turn_order": 1})
+    release.set()
+    await handler.translation_queue.join()
+
+    assert translated == ["first"] + [f"turn-{order}" for order in range(2, 18)]
+    assert max_active == 1
+    assert [message["original_text"] for message in handler.websocket.sent] == ["overflow"] + translated
+    assert handler.websocket.sent[0]["translation_status"] == "failed"
+    handler.translation_worker.cancel()
+    await asyncio.gather(handler.translation_worker, return_exceptions=True)

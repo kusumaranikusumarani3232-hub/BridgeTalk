@@ -25,10 +25,13 @@ class Settings:
     )
     SAMPLE_RATE: int = 16000
     
-    # Translation Configuration
-    TRANSLATION_API_KEY: str = os.getenv("TRANSLATION_API_KEY", "")
-    TRANSLATION_PROVIDER: str = os.getenv("TRANSLATION_PROVIDER", "auto") # auto, openai, deep_translator
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", os.getenv("TRANSLATION_API_KEY", ""))
+    # Hosted Groq is the default for the deployed app; Ollama remains available locally.
+    TRANSLATION_PROVIDER: str = os.getenv("TRANSLATION_PROVIDER", "groq").strip().lower()
+    GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
+    GROQ_BASE_URL: str = os.getenv("GROQ_BASE_URL", "https://api.groq.com/openai/v1")
+    GROQ_MODEL: str = os.getenv("GROQ_MODEL", "qwen/qwen3.8-27b")
+    OLLAMA_BASE_URL: str = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+    OLLAMA_MODEL: str = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
     
     # Host & Port Settings
     HOST: str = os.getenv("HOST", "0.0.0.0")

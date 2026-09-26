@@ -1,229 +1,107 @@
 import asyncio
+
 import pytest
+
 from app import translation_service as translation_module
-from app.translation_service import translation_service
+from app.translation_service import TranslationError, translation_service
 
 
 @pytest.fixture(autouse=True)
-def reset_gateway_state():
-    translation_module._gateway_cooldown_until = 0
-    translation_module._gateway_next_request_at = 0
+def reset_translation_state(monkeypatch):
+    monkeypatch.setattr(translation_module.settings, "TRANSLATION_PROVIDER", "ollama")
+    monkeypatch.setattr(translation_module, "_TRANSLATION_LOCK", asyncio.Lock())
+    translation_module._GROQ_COOLDOWN_UNTIL = 0
+    translation_module._GROQ_NEXT_REQUEST_AT = 0
 
 
 @pytest.mark.asyncio
-async def test_same_language_translation():
-    res = await translation_service.translate("Hello world", "en", "en")
-    assert res == "Hello world"
-
-@pytest.mark.asyncio
-async def test_empty_translation():
-    res = await translation_service.translate("", "hi", "en")
-    assert res == ""
-
-@pytest.mark.asyncio
-async def test_translation_uses_gateway_result(monkeypatch):
-    async def gateway(text, direction, romanized_hindi=False): return "नमस्ते"
-    monkeypatch.setattr(translation_module, "_call_llm_gateway", gateway)
-    res = await translation_service.translate("Hello", "en", "hi")
-    assert res == "नमस्ते"
+async def test_same_language_translation_is_passthrough():
+    assert await translation_service.translate("Hello world", "en", "en") == "Hello world"
 
 
 @pytest.mark.asyncio
-async def test_both_directions_use_gateway(monkeypatch):
-    async def gateway(text, direction, romanized_hindi=False):
-        return "ठीक है।" if direction == "en_to_hi" else "Okay."
-    monkeypatch.setattr(translation_module, "_call_llm_gateway", gateway)
-    english_to_hindi = await translation_service.translate("Okay.", "en", "hi")
-    hindi_to_english = await translation_service.translate("Okay.", "hi", "en")
+async def test_empty_translation_does_not_call_ollama(monkeypatch):
+    async def unexpected(*args, **kwargs):
+        raise AssertionError("Ollama should not be called for empty input")
 
-    assert english_to_hindi == "ठीक है।"
-    assert hindi_to_english == "Okay."
+    monkeypatch.setattr(translation_module, "_call_ollama", unexpected)
+    assert await translation_service.translate("  ", "hi", "en") == ""
 
 
 @pytest.mark.asyncio
-async def test_translation_gateway_retries_transient_server_failure(monkeypatch):
-    responses = [
-        type("Response", (), {"status_code": 503, "headers": {}, "json": lambda self: {}})(),
-        type("Response", (), {"status_code": 200, "headers": {}, "json": lambda self: {
-            "choices": [{"message": {"content": "सुप्रभात।"}}],
-            "request_id": "test-request",
-        }})(),
-    ]
+async def test_hindi_to_english_uses_local_ollama(monkeypatch):
     calls = []
 
-    class FakeClient:
-        def __init__(self, **kwargs):
-            pass
+    async def ollama(text, direction, romanized_hindi=False):
+        calls.append((text, direction, romanized_hindi))
+        return "What is here?"
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *args):
-            return None
-
-        async def post(self, *args, **kwargs):
-            calls.append(1)
-            return responses.pop(0)
-
-    async def no_wait(_):
-        return None
-
-    monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
-    monkeypatch.setattr(translation_module.asyncio, "sleep", no_wait)
-    monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
-
-    result = await translation_module._call_llm_gateway("Good morning", "en_to_hi")
-
-    assert result == "सुप्रभात।"
-    assert len(calls) == 2
+    monkeypatch.setattr(translation_module, "_call_ollama", ollama)
+    result = await translation_service.translate("यहाँ क्या है?", "hi", "en")
+    assert result == "What is here?"
+    assert calls == [("यहाँ क्या है?", "hi_to_en", False)]
 
 
 @pytest.mark.asyncio
-async def test_cooldown_serializes_requests_and_honors_retry_after(monkeypatch):
+async def test_english_to_hindi_uses_local_ollama(monkeypatch):
     calls = []
+
+    async def ollama(text, direction, romanized_hindi=False):
+        calls.append((text, direction))
+        return "पानी पियो।"
+
+    monkeypatch.setattr(translation_module, "_call_ollama", ollama)
+    result = await translation_service.translate("Drink water.", "en", "hi")
+    assert result == "पानी पियो।"
+    assert calls == [("Drink water.", "en_to_hi")]
+
+
+@pytest.mark.asyncio
+async def test_ollama_request_uses_configured_model_and_chat_api(monkeypatch):
+    recorded = {}
 
     class Response:
-        status_code = 429
-        headers = {"Retry-After": "0.25"}
-
-    class FakeClient:
-        def __init__(self, **kwargs): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): return None
-        async def post(self, *args, **kwargs):
-            calls.append(1)
-            return Response()
-
-    monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
-    monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
-
-    loop = asyncio.get_running_loop()
-    translation_module._gateway_cooldown_until = 0
-    translation_module._gateway_next_request_at = 0
-    result = await translation_module._call_llm_gateway("A fresh sentence", "en_to_hi")
-    skipped = await translation_module._call_llm_gateway("Another sentence", "en_to_hi")
-
-    assert result is None
-    assert skipped is None
-    assert len(calls) == 2
-    assert translation_module._gateway_cooldown_until > loop.time()
-
-
-@pytest.mark.asyncio
-async def test_retry_after_is_capped(monkeypatch):
-    calls = []
-
-    class Response:
-        status_code = 429
-        headers = {"Retry-After": "30"}
-
-    class FakeClient:
-        def __init__(self, **kwargs): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): return None
-        async def post(self, *args, **kwargs):
-            calls.append(1)
-            return Response()
-
-    monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
-    monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
-    translation_module._gateway_cooldown_until = 0
-    translation_module._gateway_next_request_at = 0
-
-    assert await translation_module._call_llm_gateway("A fresh sentence", "en_to_hi") is None
-    assert translation_module._gateway_cooldown_until - asyncio.get_running_loop().time() <= translation_module._MAX_RETRY_AFTER_SECONDS
-    assert translation_module._gateway_cooldown_until - asyncio.get_running_loop().time() >= translation_module._MAX_RETRY_AFTER_SECONDS - 0.1
-    assert len(calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_successful_200_resets_cooldown(monkeypatch):
-    calls = []
-    responses = [
-        type("Response", (), {"status_code": 429, "headers": {"Retry-After": "0.25"}, "json": lambda self: {}})(),
-        type("Response", (), {"status_code": 200, "headers": {}, "json": lambda self: {"choices": [{"message": {"content": "नमस्ते"}}]}})(),
-    ]
-
-    class FakeClient:
-        def __init__(self, **kwargs): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): return None
-        async def post(self, *args, **kwargs):
-            calls.append(1)
-            return responses.pop(0)
-
-    monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
-    monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
-    translation_module._gateway_cooldown_until = 0
-    translation_module._gateway_next_request_at = 0
-
-    assert await translation_module._call_llm_gateway("Hello there", "en_to_hi") is None
-    assert await translation_module._call_llm_gateway("Hello there", "en_to_hi") == "नमस्ते"
-    assert translation_module._gateway_cooldown_until == 0
-    assert len(calls) == 2
-
-
-@pytest.mark.asyncio
-async def test_gateway_http_200_translation_unchanged(monkeypatch):
-    class Response:
-        status_code = 200
-        headers = {}
+        def raise_for_status(self): pass
         def json(self):
-            return {"choices": [{"message": {"content": "यह एक परीक्षण है।"}}]}
+            return {"message": {"content": "My name is Kusma."}}
 
     class FakeClient:
         def __init__(self, **kwargs): pass
         async def __aenter__(self): return self
         async def __aexit__(self, *args): return None
-        async def post(self, *args, **kwargs): return Response()
-
-    monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
-    monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
-    translation_module._gateway_cooldown_until = 0
-    translation_module._gateway_next_request_at = 0
-    assert await translation_service.translate("This is a test", "en", "hi") == "यह एक परीक्षण है।"
-
-
-@pytest.mark.asyncio
-async def test_gateway_requests_remain_spaced_after_cooldown(monkeypatch):
-    request_times = []
-    loop = asyncio.get_running_loop()
-
-    class Response:
-        status_code = 200
-        headers = {}
-        def json(self):
-            return {"choices": [{"message": {"content": "नमस्ते"}}]}
-
-    class FakeClient:
-        def __init__(self, **kwargs): pass
-        async def __aenter__(self): return self
-        async def __aexit__(self, *args): return None
-        async def post(self, *args, **kwargs):
-            request_times.append(asyncio.get_running_loop().time())
+        async def post(self, url, json):
+            recorded["url"] = url
+            recorded["json"] = json
             return Response()
 
     monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
-    monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
-    translation_module._gateway_cooldown_until = loop.time() + 1
-    translation_module._gateway_next_request_at = 0
+    monkeypatch.setattr(translation_module.settings, "OLLAMA_BASE_URL", "http://ollama.local/")
+    monkeypatch.setattr(translation_module.settings, "OLLAMA_MODEL", "llama3.2:3b")
 
-    assert await translation_module._call_llm_gateway("during cooldown", "en_to_hi") == "नमस्ते"
-    assert await translation_module._call_llm_gateway("first", "en_to_hi") == "नमस्ते"
-    assert await translation_module._call_llm_gateway("second", "en_to_hi") == "नमस्ते"
-    assert request_times[1] - request_times[0] >= translation_module._MIN_GATEWAY_REQUEST_INTERVAL * 0.8
+    result = await translation_module._call_ollama("मेरा नाम कस्मा है", "hi_to_en")
+    assert result == "My name is Kusma."
+    assert recorded["url"] == "http://ollama.local/api/chat"
+    assert recorded["json"]["model"] == "llama3.2:3b"
+    assert recorded["json"]["stream"] is False
+    assert "professional Hindi-to-English translator" in recorded["json"]["messages"][0]["content"]
 
 
 @pytest.mark.asyncio
-async def test_gateway_never_has_concurrent_requests(monkeypatch):
+async def test_ollama_failure_is_not_replaced_with_source_text(monkeypatch):
+    async def unavailable(*args, **kwargs): return None
+    monkeypatch.setattr(translation_module, "_call_ollama", unavailable)
+    with pytest.raises(TranslationError, match="Ensure Ollama is running"):
+        await translation_service.translate("Where are you from?", "en", "hi")
+
+
+@pytest.mark.asyncio
+async def test_ollama_requests_are_serialized(monkeypatch):
     active = 0
     maximum_active = 0
 
     class Response:
-        status_code = 200
-        headers = {}
-        def json(self):
-            return {"choices": [{"message": {"content": "translated"}}]}
+        def raise_for_status(self): pass
+        def json(self): return {"message": {"content": "translated"}}
 
     class FakeClient:
         def __init__(self, **kwargs): pass
@@ -238,12 +116,85 @@ async def test_gateway_never_has_concurrent_requests(monkeypatch):
             return Response()
 
     monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
-    monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
-    translation_module._gateway_cooldown_until = 0
-    translation_module._gateway_next_request_at = 0
     results = await asyncio.gather(
-        translation_module._call_llm_gateway("first", "en_to_hi"),
-        translation_module._call_llm_gateway("second", "en_to_hi"),
+        translation_module._call_ollama("one", "en_to_hi"),
+        translation_module._call_ollama("two", "en_to_hi"),
+    )
+    assert results == ["translated", "translated"]
+    assert maximum_active == 1
+
+
+@pytest.mark.asyncio
+async def test_groq_is_selected_for_deployed_provider(monkeypatch):
+    async def groq(text, direction, romanized_hindi=False): return "What's your name?"
+    monkeypatch.setattr(translation_module.settings, "TRANSLATION_PROVIDER", "groq")
+    monkeypatch.setattr(translation_module, "_call_groq", groq)
+    assert await translation_service.translate("आपका नाम क्या है?", "hi", "en") == "What's your name?"
+
+
+@pytest.mark.asyncio
+async def test_groq_uses_configured_model_and_shared_429_cooldown(monkeypatch):
+    requests = []
+    responses = [
+        type("Response", (), {"status_code": 429, "headers": {"Retry-After": "0.25"}})(),
+        type("Response", (), {
+            "status_code": 200,
+            "headers": {},
+            "raise_for_status": lambda self: None,
+            "json": lambda self: {"choices": [{"message": {"content": "Drink water."}}]},
+        })(),
+    ]
+
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def post(self, url, headers, json):
+            requests.append((url, headers, json))
+            return responses.pop(0)
+
+    monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(translation_module.settings, "GROQ_API_KEY", "test-key")
+    monkeypatch.setattr(translation_module.settings, "GROQ_MODEL", "qwen/qwen3.8-27b")
+    translation_module._GROQ_MIN_INTERVAL_SECONDS = 0
+
+    result = await translation_module._call_groq("पानी पियो", "hi_to_en")
+    assert result == "Drink water."
+    assert len(requests) == 2
+    assert requests[0][0] == "https://api.groq.com/openai/v1/chat/completions"
+    assert requests[0][1]["Authorization"] == "Bearer test-key"
+    assert requests[0][2]["model"] == "qwen/qwen3.8-27b"
+
+
+@pytest.mark.asyncio
+async def test_groq_requests_are_serialized(monkeypatch):
+    active = 0
+    maximum_active = 0
+
+    class Response:
+        status_code = 200
+        headers = {}
+        def raise_for_status(self): pass
+        def json(self): return {"choices": [{"message": {"content": "translated"}}]}
+
+    class FakeClient:
+        def __init__(self, **kwargs): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *args): return None
+        async def post(self, *args, **kwargs):
+            nonlocal active, maximum_active
+            active += 1
+            maximum_active = max(maximum_active, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return Response()
+
+    monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(translation_module.settings, "GROQ_API_KEY", "test-key")
+    translation_module._GROQ_MIN_INTERVAL_SECONDS = 0
+    results = await asyncio.gather(
+        translation_module._call_groq("first", "en_to_hi"),
+        translation_module._call_groq("second", "en_to_hi"),
     )
     assert results == ["translated", "translated"]
     assert maximum_active == 1

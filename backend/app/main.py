@@ -35,7 +35,8 @@ async def health_check():
         "tagline": settings.PROJECT_TAGLINE,
         "version": settings.VERSION,
         "assemblyai_configured": settings.is_assemblyai_configured,
-        "translation_provider": settings.TRANSLATION_PROVIDER
+        "translation_provider": settings.TRANSLATION_PROVIDER,
+        "translation_model": settings.GROQ_MODEL if settings.TRANSLATION_PROVIDER == "groq" else settings.OLLAMA_MODEL,
     }
 
 @app.post("/api/translate", response_model=TranslationResponse)

@@ -58,7 +58,7 @@ flowchart TD
 - **Frontend**: React 18, Vite, Modern Vanilla CSS (Dark Glassmorphic design system), Lucide Icons, Web Audio API, Web Speech API (SpeechSynthesis).
 - **Backend**: Python 3.10+, FastAPI, Uvicorn, WebSockets (`websockets`), `pydantic-settings`, `python-dotenv`.
 - **Speech Recognition**: AssemblyAI Realtime Speech-to-Text API (v3).
-- **Translation Engine**: Configurable LLM API (OpenAI GPT-3.5/4) with automatic fallback to `deep_translator` / free translation backend.
+- **Translation Engine**: Hosted Groq Qwen 3.8 model for deployment; AssemblyAI is used for real-time speech recognition.
 - **Insights Engine**: Regex & NLP factual entity extractor.
 
 ---
@@ -135,7 +135,15 @@ Open `.env` and insert your **AssemblyAI API Key**:
 ASSEMBLYAI_API_KEY=your_actual_assemblyai_api_key
 ```
 
-*(Optional: Add `TRANSLATION_API_KEY` for OpenAI LLM translation. If omitted, free translation fallback is used automatically).*
+Create a Groq API key for hosted translation and add it to the backend environment:
+
+```bash
+TRANSLATION_PROVIDER=groq
+GROQ_API_KEY=your_groq_api_key
+GROQ_MODEL=qwen/qwen3.8-27b
+```
+
+For the deployed Render service, add these values under **Environment** in the Render dashboard, then redeploy. Keep the Groq key private and never put it in frontend variables. The free Groq tier has account/model rate limits, so check its dashboard if it returns 429s.
 
 ---
 
@@ -168,6 +176,16 @@ cd ..
 ---
 
 ## 🏃 Running BridgeTalk
+
+### Optional: local translation during development
+
+To use Ollama locally instead of the hosted provider, install Ollama and pull its Hindi/English-capable model:
+
+```bash
+ollama pull llama3.2:3b
+```
+
+Set `TRANSLATION_PROVIDER=ollama`; `OLLAMA_BASE_URL` defaults to `http://127.0.0.1:11434` and `OLLAMA_MODEL` defaults to `llama3.2:3b`.
 
 ### Start Backend Server
 

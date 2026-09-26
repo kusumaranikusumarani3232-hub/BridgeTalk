@@ -178,14 +178,14 @@ async def test_disconnect_cancels_pending_translation(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_rate_limited_queue_recovers_after_cooldown(monkeypatch):
+async def test_queued_turns_translate_sequentially_with_local_ollama(monkeypatch):
     requests = []
 
-    responses = [
-        type("Response", (), {"status_code": 429, "headers": {"Retry-After": "0.25"}})(),
-        type("Response", (), {"status_code": 200, "headers": {}, "json": lambda self: {"choices": [{"message": {"content": "Bonjour."}}]}})(),
-        type("Response", (), {"status_code": 200, "headers": {}, "json": lambda self: {"choices": [{"message": {"content": "Good morning."}}]}})(),
-    ]
+    translations = iter(["सुप्रभात।", "दूसरा अनुवाद।", "तीसरा अनुवाद।"])
+
+    class Response:
+        def raise_for_status(self): pass
+        def json(self): return {"message": {"content": next(translations)}}
 
     class FakeClient:
         def __init__(self, **kwargs): pass
@@ -193,13 +193,11 @@ async def test_rate_limited_queue_recovers_after_cooldown(monkeypatch):
         async def __aexit__(self, *args): return None
         async def post(self, *args, **kwargs):
             requests.append(1)
-            return responses.pop(0)
+            return Response()
 
     from app import translation_service as translation_module
     monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
-    monkeypatch.setattr(translation_module.settings, "ASSEMBLYAI_API_KEY", "test-api-key")
-    translation_module._gateway_cooldown_until = 0
-    translation_module._gateway_next_request_at = 0
+    monkeypatch.setattr(translation_module.settings, "TRANSLATION_PROVIDER", "ollama")
 
     handler = WebSocketHandler(FakeWebSocket())
     for order, text in enumerate(["first request", "second request", "third request"]):
@@ -209,7 +207,7 @@ async def test_rate_limited_queue_recovers_after_cooldown(monkeypatch):
     assert len(requests) == 3
     outcomes = [message for message in handler.websocket.sent if message["translation_status"] != "pending"]
     assert len(outcomes) == 3
-    assert [message["translation_status"] for message in outcomes] == ["failed", "translated", "translated"]
+    assert [message["translation_status"] for message in outcomes] == ["translated"] * 3
     assert all(message["turn_id"] == message["id"] for message in outcomes)
     handler.translation_worker.cancel()
     await asyncio.gather(handler.translation_worker, return_exceptions=True)

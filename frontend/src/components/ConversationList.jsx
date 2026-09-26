@@ -49,7 +49,7 @@ export function ConversationList({ messages, onSpeakText }) {
                         onClick={() => {
                           const tgt = String(msg.target_language || '').toLowerCase();
                           const targetLang = tgt.includes('hindi') || tgt.startsWith('hi') ? 'hi' : 'en';
-                          onSpeakText(msg.translation, targetLang, true);
+                          onSpeakText(msg.translated_text ?? msg.translation, targetLang, true);
                         }}
                       >
                         🔊 Listen
@@ -69,7 +69,7 @@ export function ConversationList({ messages, onSpeakText }) {
                     </div>
                     <div className="msg-translation-text">
                       {msg.translation_status === 'translated'
-                        ? `"${msg.translation}"`
+                        ? `"${msg.translated_text ?? msg.translation}"`
                         : msg.translation_status === 'pending'
                           ? 'Translating…'
                           : 'Translation failed. Please try this turn again.'}

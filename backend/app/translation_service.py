@@ -12,73 +12,6 @@ logger = logging.getLogger("bridgetalk.translation")
 class TranslationError(RuntimeError):
     """Raised when no translated result is available."""
 
-# ---------------------------------------------------------------------------
-# Bulletproof fallback map — guarantees flawless rendering for demo sentences
-# regardless of LLM Gateway availability. Keys are lowercased + stripped.
-# ---------------------------------------------------------------------------
-_FALLBACK_MAP: dict[str, str] = {
-    # English → Hindi
-    "my name is kusuma":              "मेरा नाम कुसुमा है।",
-    "my name is kusma":               "मेरा नाम कुसुमा है।",
-    "my name is kusuma.":             "मेरा नाम कुसुमा है।",
-    "my name is kusma.":              "मेरा नाम कुसुमा है।",
-    "hello, my name is kusma":        "नमस्ते, मेरा नाम कुसमा है।",
-    "hello, my name is kusma.":       "नमस्ते, मेरा नाम कुसमा है।",
-    "hello my name is kusma":         "नमस्ते, मेरा नाम कुसमा है।",
-    "hello, my name is kusuma":       "नमस्ते, मेरा नाम कुसुमा है।",
-    "hello, my name is kusuma.":      "नमस्ते, मेरा नाम कुसुमा है।",
-    "oh":                             "ओह।",
-    "oh.":                            "ओह।",
-    "what is your name":              "आपका नाम क्या है?",
-    "what is your name?":             "आपका नाम क्या है?",
-    "whats your name":                "आपका नाम क्या है?",
-    "whats your name?":               "आपका नाम क्या है?",
-    "what's your name":               "आपका नाम क्या है?",
-    "what's your name?":              "आपका नाम क्या है?",
-    "can you help me":                "क्या आप मेरी मदद कर सकते हैं?",
-    "can you help me?":               "क्या आप मेरी मदद कर सकते हैं?",
-    "hello":                          "नमस्ते",
-    "hi":                             "नमस्ते",
-    "hello!":                         "नमस्ते",
-    "hi!":                            "नमस्ते",
-    "okay":                           "ठीक है।",
-    "okay.":                          "ठीक है।",
-    "ok":                             "ठीक है।",
-    "ok.":                            "ठीक है।",
-    "good morning":                   "सुप्रभात।",
-    "i'm doing well, thank you.":     "मैं अच्छा हूँ, धन्यवाद।",
-    "i'm doing well, thank you":      "मैं अच्छा हूँ, धन्यवाद।",
-    # Hindi → English
-    "mera nam kusuma":               "My name is Kusuma.",
-    "mera naam kusuma":              "My name is Kusuma.",
-    "mera nam kusuma hai":           "My name is Kusuma.",
-    "mera naam kusuma hai":          "My name is Kusuma.",
-    "mera naam kusuma hai.":         "My name is Kusuma.",
-    "आपका नाम क्या है?":             "What's your name?",
-    "आपका नाम क्या है":              "What's your name?",
-    "क्या है आपका नाम?":             "What's your name?",
-    "क्या है आपका नाम":              "What's your name?",
-    "मेरा नाम कुसुमा है।":           "My name is Kusuma.",
-    "मेरा नाम कुसुमा है":            "My name is Kusuma.",
-    "मेरा नाम गुस्मा है":            "My name is Kusuma.",
-    "मेरा नाम गुस्मा है।":           "My name is Kusuma.",
-    "क्या आप मेरी मदद कर सकते हैं?": "Can you help me?",
-    "क्या आप मेरी मदद कर सकते हैं":  "Can you help me?",
-    "नमस्ते":                        "Hello!",
-    "आप कैसे हैं?":                  "How are you?",
-    "आप कैसे हैं":                   "How are you?",
-    "आप कैसे हो?":                   "How are you?",
-    "आप कैसे हो":                    "How are you?",
-    "समय क्या हुआ है?":               "What time is it?",
-    "समय क्या हुआ है":                "What time is it?",
-    "आज मौसम कैसे है?":              "How is the weather today?",
-    "आज मौसम कैसे है":               "How is the weather today?",
-    "आज मौसम कैसा है?":              "How is the weather today?",
-    "व्हाट्सएप नेम":                 "What's your name?",
-    "मैं आयद्रवाद में हूँ।":          "I'm in Hyderabad.",
-    "मैं आयद्रवाद में हूँ":           "I'm in Hyderabad.",
-}
-
 # AssemblyAI LLM Gateway endpoint (LeMUR was sunset on 2026-03-31).
 _LLM_GATEWAY_URL = "https://llm-gateway.assemblyai.com/v1/chat/completions"
 _LLM_MODEL = "qwen3.5-4b-32k-fast"
@@ -123,27 +56,6 @@ def _has_latin(text: str) -> bool:
     return bool(re.search(r"[A-Za-z]", text))
 
 
-def _fallback_lookup(text: str, target_lang: str | None = None) -> str | None:
-    """
-    Fuzzy lookup in the hardcoded fallback map.
-    Tries exact match first, then a cleaned/lowercased match.
-    Returns None if no match found.
-    """
-    key = text.strip().lower()
-    if target_lang == "en" and key.rstrip("?.!,;:") in {"ok", "okay"}:
-        return "Okay."
-    result = _FALLBACK_MAP.get(key)
-    # Try stripping trailing punctuation for a second attempt
-    if result is None:
-        key_stripped = key.rstrip("?.!,;:")
-        result = _FALLBACK_MAP.get(key_stripped)
-    if result and target_lang == "en" and _has_devanagari(result):
-        return None
-    if result and target_lang == "hi" and not _has_devanagari(result):
-        return None
-    return result
-
-
 async def _call_llm_gateway(text: str, direction: str, romanized_hindi: bool = False) -> str | None:
     """
     Call AssemblyAI's OpenAI-compatible LLM Gateway.
@@ -185,16 +97,12 @@ async def _call_llm_gateway(text: str, direction: str, romanized_hindi: bool = F
     }
 
     global _gateway_cooldown_until, _gateway_next_request_at
-    now = asyncio.get_running_loop().time()
-    if now < _gateway_cooldown_until:
-        logger.info("LLM Gateway cooldown active; skipping request.")
-        return None
-
     async with _gateway_lock:
-        now = asyncio.get_running_loop().time()
-        if now < _gateway_cooldown_until:
-            logger.info("LLM Gateway cooldown active; skipping queued request.")
-            return None
+        # Hold the shared lock while waiting so queued requests recover in
+        # order and never hit the gateway concurrently after a 429.
+        cooldown_wait = _gateway_cooldown_until - asyncio.get_running_loop().time()
+        if cooldown_wait > 0:
+            await asyncio.sleep(cooldown_wait)
         for attempt in range(_MAX_GATEWAY_ATTEMPTS):
             spacing = _gateway_next_request_at - asyncio.get_running_loop().time()
             if spacing > 0:
@@ -252,7 +160,7 @@ async def _call_llm_gateway(text: str, direction: str, romanized_hindi: bool = F
 class TranslationService:
     """
     Translation service backed by AssemblyAI's LLM Gateway.
-    Falls back to common phrases when the Gateway is unavailable.
+    Returns only real gateway translations; failures are surfaced to the turn.
     """
 
     async def translate(self, text: str, source_lang: str, target_lang: str) -> str:
@@ -267,13 +175,7 @@ class TranslationService:
         if source_code == target_code:
             return clean_text
 
-        # --- 1. Hardcoded fallback map (instant, zero-latency) ---------------
-        fallback = _fallback_lookup(clean_text, target_code)
-        if fallback:
-            logger.info(f"Fallback map hit: {clean_text!r} → {fallback!r}")
-            return fallback
-
-        # --- 2. Choose the configured target direction ----------------------
+        # --- Choose the configured target direction --------------------------
         has_hindi = _has_devanagari(clean_text)
         has_eng   = _has_latin(clean_text)
 
@@ -298,7 +200,7 @@ class TranslationService:
         else:
             direction = "en_to_hi" if source_lang == "en" else "hi_to_en"
 
-        # --- 3. LLM Gateway call ---------------------------------------------
+        # --- LLM Gateway call -------------------------------------------------
         result = await _call_llm_gateway(
             clean_text,
             direction,

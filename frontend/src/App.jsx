@@ -54,13 +54,11 @@ export default function App() {
 
     messages.forEach((message) => {
       if (!message?.id || spokenIdsRef.current.has(message.id)) return;
-      const translation = String(message.translation ?? '').trim();
+      const translation = String(message.translated_text ?? message.translation ?? '').trim();
       if (
         !speakEnabled ||
         message.translation_status !== 'translated' ||
-        !translation ||
-        translation === '...' ||
-        translation === '…'
+        !translation
       ) return;
       const targetLanguage = String(message.target_language || '').toLowerCase();
       const targetLangCode = targetLanguage.includes('hindi') || targetLanguage.startsWith('hi') ? 'hi' : 'en';

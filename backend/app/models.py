@@ -24,6 +24,7 @@ class PartialTranscript(BaseModel):
 
 class FinalMessage(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    turn_id: Optional[str] = None
     type: str = "final"
     speaker: str
     speaker_name: str
@@ -31,6 +32,7 @@ class FinalMessage(BaseModel):
     target_language: str
     original_text: str
     translation: str = ""
+    translated_text: str = ""
     translation_status: str = "translated"
     insights: List[InsightItem] = []
     timestamp: str = Field(default_factory=lambda: time.strftime("%H:%M:%S"))

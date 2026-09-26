@@ -155,12 +155,37 @@ async def test_disconnected_client_does_not_receive_pending_translation_result(m
 
 
 @pytest.mark.asyncio
-async def test_rate_limited_queue_fails_turns_without_repeating_gateway_requests(monkeypatch):
+async def test_disconnect_cancels_pending_translation(monkeypatch):
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    async def translate(text, source_lang, target_lang):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    monkeypatch.setattr(websocket_module.translation_service, "translate", translate)
+    handler = WebSocketHandler(FakeWebSocket())
+    await handler.on_final_transcript("disconnect test", "person_b", {"turn_order": 50})
+    await started.wait()
+    handler.client_connected = False
+    await handler.stop_session()
+    assert cancelled.is_set()
+    assert [item["translation_status"] for item in handler.websocket.sent] == ["pending"]
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_queue_recovers_after_cooldown(monkeypatch):
     requests = []
 
-    class Response:
-        status_code = 429
-        headers = {"Retry-After": "5"}
+    responses = [
+        type("Response", (), {"status_code": 429, "headers": {"Retry-After": "0.25"}})(),
+        type("Response", (), {"status_code": 200, "headers": {}, "json": lambda self: {"choices": [{"message": {"content": "Bonjour."}}]}})(),
+        type("Response", (), {"status_code": 200, "headers": {}, "json": lambda self: {"choices": [{"message": {"content": "Good morning."}}]}})(),
+    ]
 
     class FakeClient:
         def __init__(self, **kwargs): pass
@@ -168,7 +193,7 @@ async def test_rate_limited_queue_fails_turns_without_repeating_gateway_requests
         async def __aexit__(self, *args): return None
         async def post(self, *args, **kwargs):
             requests.append(1)
-            return Response()
+            return responses.pop(0)
 
     from app import translation_service as translation_module
     monkeypatch.setattr(translation_module.httpx, "AsyncClient", FakeClient)
@@ -181,9 +206,10 @@ async def test_rate_limited_queue_fails_turns_without_repeating_gateway_requests
         await handler.on_final_transcript(text, "person_b", {"turn_order": order})
     await handler.translation_queue.join()
 
-    assert len(requests) == 1
+    assert len(requests) == 3
     outcomes = [message for message in handler.websocket.sent if message["translation_status"] != "pending"]
     assert len(outcomes) == 3
-    assert all(message["translation_status"] == "failed" for message in outcomes)
+    assert [message["translation_status"] for message in outcomes] == ["failed", "translated", "translated"]
+    assert all(message["turn_id"] == message["id"] for message in outcomes)
     handler.translation_worker.cancel()
     await asyncio.gather(handler.translation_worker, return_exceptions=True)

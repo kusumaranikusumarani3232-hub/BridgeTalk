@@ -19,7 +19,10 @@ def test_demo_data_endpoint():
     assert data[0]["speaker"] == "person_a"
     assert data[1]["speaker"] == "person_b"
 
-def test_translate_endpoint():
+def test_translate_endpoint(monkeypatch):
+    from app.main import translation_service
+    async def translate(text, source_lang, target_lang): return "सुप्रभात।"
+    monkeypatch.setattr(translation_service, "translate", translate)
     client = TestClient(app)
     response = client.post(
         "/api/translate",

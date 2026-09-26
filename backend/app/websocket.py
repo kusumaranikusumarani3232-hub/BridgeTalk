@@ -167,16 +167,16 @@ class WebSocketHandler:
     async def stop_session(self):
         self.is_session_active = False
         await self.assemblyai_service.disconnect()
-        if self.translation_worker:
+        if not self.client_connected and self.translation_worker:
             self.translation_worker.cancel()
             await asyncio.gather(self.translation_worker, return_exceptions=True)
             self.translation_worker = None
-        while not self.translation_queue.empty():
-            try:
-                self.translation_queue.get_nowait()
-                self.translation_queue.task_done()
-            except asyncio.QueueEmpty:
-                break
+            while not self.translation_queue.empty():
+                try:
+                    self.translation_queue.get_nowait()
+                    self.translation_queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
         if self._socket_open():
             await self.send_status(
                 connected=True,
@@ -235,9 +235,9 @@ class WebSocketHandler:
             return
         cfg = turn["cfg"]
         final_msg = FinalMessage(
-            id=turn["id"], speaker=turn["speaker"], speaker_name=cfg["name"],
+            id=turn["id"], turn_id=turn["id"], speaker=turn["speaker"], speaker_name=cfg["name"],
             source_language=cfg["source_name"], target_language=cfg["target_name"],
-            original_text=turn["text"], translation=translation,
+            original_text=turn["text"], translation=translation, translated_text=translation,
             translation_status=status,
             insights=insights_service.extract_insights(turn["text"], translation) if translation else [],
         )

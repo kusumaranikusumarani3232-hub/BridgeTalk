@@ -98,8 +98,6 @@ describe('App TTS after asynchronous translation updates', () => {
         turn('failed', { status: 'failed', translation: 'No translation' }),
         turn('empty', { translation: '' }),
         turn('null', { translation: null }),
-        turn('dots', { translation: '...' }),
-        turn('ellipsis', { translation: '…' }),
       ];
       view.rerender(<App />);
     });

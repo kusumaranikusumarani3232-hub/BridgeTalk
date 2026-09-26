@@ -63,24 +63,27 @@ export function useWebSocket() {
           setPartialTranscript(data);
           if (data.speaker) setActiveSpeakerState(data.speaker);
         } else if (data.type === 'final') {
-          if (!data.id) return;
-          const isUpdate = seenMessageIdsRef.current.has(data.id);
-          seenMessageIdsRef.current.add(data.id);
+          const turnId = data.turn_id || data.id;
+          if (!turnId) return;
+          const isUpdate = seenMessageIdsRef.current.has(turnId);
+          seenMessageIdsRef.current.add(turnId);
           setPartialTranscript(null);
           if (data.speaker) setActiveSpeakerState(data.speaker);
           const finalPayload = {
-            id: data.id,
+            id: turnId,
+            turn_id: turnId,
             speaker: data.speaker,
             speaker_name: data.speaker_name,
             source_language: data.source_language,
             target_language: data.target_language,
             original_text: data.original_text,
-            translation: data.translation || '',
+            translation: data.translated_text ?? data.translation ?? '',
+            translated_text: data.translated_text ?? data.translation ?? '',
             translation_status: data.translation_status || 'failed',
             insights: data.insights || [],
           };
           setMessages((prev) => isUpdate
-            ? prev.map((message) => message.id === data.id ? { ...message, ...finalPayload } : message)
+            ? prev.map((message) => message.id === turnId ? { ...message, ...finalPayload } : message)
             : [...prev, finalPayload]);
           if (data.insights && data.insights.length > 0) {
             setInsights((prev) => {
